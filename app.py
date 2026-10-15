@@ -147,6 +147,7 @@ app.add_middleware(
         "Content-Type",
         "X-API-Key",
         "X-Auth-Token",
+        "X-Schedule-Context",
         "X-Odysseus-Internal-Token",
         "X-Odysseus-Owner",
         "X-Requested-With",
@@ -182,6 +183,7 @@ from starlette.responses import JSONResponse as _JSONResponse
 REQUEST_HARD_TIMEOUT = float(os.getenv("REQUEST_HARD_TIMEOUT", "45"))
 _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/chat",            # streaming
+    "/api/schedule/chat",   # native local tool loop, own 180s timeout
     "/api/shell/stream",    # SSE
     "/api/research",        # multi-minute jobs
     "/api/model/download",  # tmux setup may run pip installs
@@ -748,6 +750,10 @@ app.include_router(setup_chat_routes(
     webhook_manager=webhook_manager,
     skills_manager=skills_manager,
 ))
+
+# Native personal-schedule integration (request-scoped tools only)
+from routes.schedule_routes import setup_schedule_routes
+app.include_router(setup_schedule_routes(session_manager, chat_processor))
 
 # Research (background deep-research tasks)
 from routes.research.research_routes import setup_research_routes
