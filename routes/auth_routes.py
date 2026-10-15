@@ -83,7 +83,7 @@ class SetAdminRequest(BaseModel):
 class SetOpenRegistrationRequest(BaseModel):
     enabled: bool
 
-SESSION_COOKIE = "odysseus_session"
+SESSION_COOKIE = os.getenv("ODYSSEUS_SESSION_COOKIE", "odysseus_session")
 
 
 def _secure_cookie(request: Request) -> bool:
