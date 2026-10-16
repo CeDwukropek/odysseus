@@ -175,3 +175,72 @@ def test_native_route_keeps_only_text_history_and_binds_native_account(monkeypat
     assert [message.content for message in persisted] == ["Test request", "Test response"]
     assert "synthetic-provider" not in repr(persisted)
     assert "wks1" not in repr(persisted)
+
+
+def semantic_case(completion, request, intent="query"):
+    tool = "schedule.find_makeup_options" if intent == "makeup" else "schedule.get_next_occurrence"
+    body = SimpleNamespace(faculty="EiAs3", groups={"Lk": "Lk1"}, intent=intent,
+                           message="kiedy mam najbliższe laby z Modelowania układów dynamicznych?")
+    identity = {"selection": {"faculty": "EiAs3", "groups": {"Lk": "Lk1"}},
+                "tools": [{"name": tool, "description": "semantic query", "inputSchema": {}}]}
+    return run(run_schedule_agent(body, identity, SimpleNamespace(request=request), {}, [], "semantic", completion=completion))
+
+
+def test_semantic_lookup_uses_backend_answer_even_when_model_claims_no_classes():
+    calls = iter([[{"name": "schedule_get_next_occurrence", "arguments": '{"query":"Modelowania układów dynamicznych","kind":"laboratory"}'}], []])
+    async def completion(endpoint, messages, tools, sid):
+        assert "wks1" not in json.dumps(messages)
+        return {"content": "Nie znalazłem żadnych zajęć", "calls": next(calls)}
+    async def request(body):
+        assert "groups" not in body["arguments"]
+        return {"status": "found", "subject": "Modelowanie układów dynamicznych",
+                "event": {"id": "actual", "date": "2026-10-19", "group": "Lk1"},
+                "message": "Najbliższe zajęcia: 2026-10-19, 07:30, Lk1"}
+    result = semantic_case(completion, request)
+    assert result["output"] == "Najbliższe zajęcia: 2026-10-19, 07:30, Lk1"
+    assert result["evidence"][0]["event"]["id"] == "actual"
+    assert result["proposals"] == []
+
+
+def test_semantic_query_retries_an_answer_without_reading_the_schedule():
+    turns = iter([[], [{"name": "schedule_get_next_occurrence", "arguments": '{"query":"MUD"}'}], []])
+    async def completion(*args):
+        return {"content": "No classes", "calls": next(turns)}
+    async def request(body):
+        return {"status": "missing_groups", "message": "Wybierz grupę Lk w aplikacji."}
+    assert semantic_case(completion, request)["output"] == "Wybierz grupę Lk w aplikacji."
+
+
+def test_failed_read_is_not_presented_as_an_empty_schedule():
+    turns = iter([[{"name": "schedule_get_next_occurrence", "arguments": '{"query":"MUD"}'}], []])
+    async def completion(*args):
+        return {"content": "Nie masz zajęć", "calls": next(turns)}
+    async def request(body):
+        raise HTTPException(503, "Backend unavailable")
+    result = semantic_case(completion, request)
+    assert result["output"].startswith("Nie udało się odczytać")
+    assert result["evidence"][0]["status"] == "read_failed"
+
+
+def test_makeup_keeps_backend_conflict_cards_and_cannot_mutate():
+    turns = iter([[{"name": "schedule_find_makeup_options", "arguments": '{"query":"MUD","kind":"laboratory"}'}], []])
+    async def completion(*args):
+        return {"content": "Moved!", "calls": next(turns)}
+    async def request(body):
+        return {"status": "found", "message": "Wybierz istniejący termin.",
+                "slots": [{"event_id": "real-source", "conflict_status": "conflict"}]}
+    result = semantic_case(completion, request, "makeup")
+    assert result["slots"][0]["conflict_status"] == "conflict"
+    assert result["output"] == "Wybierz istniejący termin."
+    assert result["proposals"] == []
+
+
+def test_native_route_rejects_groups_not_matching_signed_selection(monkeypatch):
+    import routes.schedule_routes as routes
+    monkeypatch.setenv("SCHEDULE_GATEWAY_URL", "http://fixed-gateway")
+    async def identity(self, session, intent):
+        return {"principal": "synthetic", "selection": {"faculty": "EiAs3", "groups": {"Lk": "Lk1"}}}
+    monkeypatch.setattr(routes.ScheduleGateway, "identity", identity)
+    response = native_client(monkeypatch).post("/api/schedule/chat", headers={"X-Schedule-Context": "wks1.synthetic"},
+        json={"message": "Test", "faculty": "EiAs3", "session_id": "s", "groups": {"Lk": "Lk5"}})
+    assert response.status_code == 403

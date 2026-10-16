@@ -104,6 +104,9 @@ def setup_schedule_routes(session_manager, chat_processor):
             raise HTTPException(503, "Brak konfiguracji gateway planu.")
         gateway = ScheduleGateway(gateway_url, token)
         identity = await gateway.identity(body.session_id, body.intent)
+        selection = identity.get("selection")
+        if selection is not None and (selection.get("faculty") != body.faculty or selection.get("groups") != body.groups):
+            raise HTTPException(403, "Wybrany plan lub grupy zmieniły się. Wyślij wiadomość ponownie.")
         endpoints = configured_endpoints(owner)
         endpoint = next((row for row in endpoints if row.id == body.endpoint_id), None) if body.endpoint_id else next(iter(endpoints), None)
         if endpoint is None:
@@ -148,7 +151,9 @@ def setup_schedule_routes(session_manager, chat_processor):
             try:
                 async with asyncio.timeout(180):
                     result = await run_schedule_agent(body, identity, gateway, runtime, history, sid, preface)
-                    if body.intent == "makeup" and result.get("candidates"):
+                    if body.intent == "makeup" and result.get("slots"):
+                        result.update(intent="SLOTS", ui={"type": "slot_choices", "actions": True}, data={"slots": result["slots"]})
+                    elif body.intent == "makeup" and result.get("candidates"):
                         slots = await makeup_cards(result["candidates"], gateway, body)
                         result.update(intent="SLOTS", ui={"type": "slot_choices", "actions": True}, data={"slots": slots})
             except TimeoutError:
@@ -158,6 +163,7 @@ def setup_schedule_routes(session_manager, chat_processor):
             except Exception:
                 raise HTTPException(503, "Lokalny agent nie odpowiedział. Sprawdź konfigurację modelu.")
             result.pop("candidates", None)
+            result.pop("slots", None)
             # Only transcript text is retained. No delegated tokens or provider headers.
             session_manager.add_message(sid, ChatMessage(role="user", content=body.message))
             session_manager.add_message(sid, ChatMessage(role="assistant", content=result["output"],

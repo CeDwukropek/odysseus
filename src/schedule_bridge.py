@@ -131,8 +131,8 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
         "Brak kolizji nie oznacza zgody prowadzącego na odrobienie.")
     skill = Path(__file__).resolve().parents[1] / "integrations/schedule-agent/SKILL.md"
     policy += "\n\n" + skill.read_text(encoding="utf-8").split("---", 2)[-1].strip()
-    context = {"today": today, "timezone": "Europe/Warsaw", "faculty": body.faculty,
-               "groups": body.groups, "intent": body.intent}
+    selection = identity.get("selection") or {"faculty": body.faculty, "groups": body.groups}
+    context = {"today": today, "timezone": "Europe/Warsaw", **selection, "intent": body.intent}
     messages = [{"role": "system", "content": policy}, *(preface or []), *history[-16:],
                 {"role": "user", "content": "Aktualny wybór w aplikacji (dane): " + json.dumps(context, ensure_ascii=False)},
                 {"role": "user", "content": body.message}]
@@ -140,13 +140,30 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
                  "description": tool["description"], "parameters": tool["inputSchema"]}}
                  for tool in identity["tools"]]
     names = {tool["name"].replace(".", "_"): tool["name"] for tool in identity["tools"]}
-    proposals, candidates = [], {}
+    proposals, candidates, slots, evidence = [], {}, [], []
+    answer = None
+    semantic = {"schedule.find_subjects", "schedule.get_next_occurrence", "schedule.get_my_schedule", "schedule.find_makeup_options"}
+    must_read = bool(semantic.intersection(names.values())) and (body.intent == "makeup" or
+        any(word in body.message.lower() for word in ("kiedy", "najbli", "jutro", "dzis", "plan", "zaj", "lab", "wyk", "ćwicz", "cwicz")))
+    retried_read = False
+
+    def finish(content):
+        output = answer if answer and not proposals and body.intent in {"query", "makeup"} else content
+        return {"output": output or "Sprawdź przygotowane podglądy.", "proposals": proposals,
+                "candidates": list(candidates.values()), "slots": slots, "evidence": evidence}
+
     for _round in range(6):
         reply = await completion(endpoint, messages, functions, session_id)
         calls = reply.get("calls") or []
         if not calls:
-            return {"output": reply.get("content") or "Sprawdź przygotowane podglądy.",
-                    "proposals": proposals, "candidates": list(candidates.values())}
+            if must_read and not any(item["tool"] != "schedule.find_subjects" or item["status"] != "resolved" for item in evidence):
+                if not retried_read:
+                    retried_read = True
+                    messages.append({"role": "assistant", "content": reply.get("content") or ""})
+                    messages.append({"role": "user", "content": "Nie sprawdzono jeszcze danych. Przed odpowiedzią o terminach wywołaj odpowiednie narzędzie schedule_get_next_occurrence, schedule_get_my_schedule lub schedule_find_makeup_options."})
+                    continue
+                return finish("Nie udało się sprawdzić danych planu. Nie mogę potwierdzić terminu ani braku zajęć. Spróbuj ponownie.")
+            return finish(reply.get("content"))
         if len(calls) > 4:
             raise HTTPException(422, "Model przekroczył limit operacji naraz.")
         native_calls = [{"id": call.get("id") or str(uuid.uuid4()), "type": "function",
@@ -162,6 +179,13 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
                 if name in {"schedule.get_events", "schedule.find_event"} and args.get("faculty") != body.faculty:
                     raise HTTPException(422, "Wybierz ten plan w aplikacji przed wyszukiwaniem.")
                 result = await gateway.request({"tool": name, "arguments": args})
+                if name in semantic:
+                    evidence.append({"tool": name, "status": result.get("status"), "subject": result.get("subject"),
+                                     "event": result.get("event"), "total": result.get("total")})
+                    if result.get("message"):
+                        answer = result["message"]
+                    if name == "schedule.find_makeup_options":
+                        slots = result.get("slots", [])
                 if result.get("proposal"):
                     proposals.append(result["proposal"])
                 if name == "schedule.get_events":
@@ -172,8 +196,12 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
                             candidates[row["id"]] = row
             except HTTPException as error:
                 result = {"error": str(error.detail), "status": error.status_code}
+                if name in semantic:
+                    evidence.append({"tool": name, "status": "read_failed"})
+                    answer = "Nie udało się odczytać danych planu. To nie oznacza, że nie masz zajęć. Spróbuj ponownie."
+                    if name == "schedule.find_makeup_options":
+                        slots = []
             except (ValueError, TypeError, KeyError):
                 result = {"error": "Nieprawidłowe argumenty narzędzia."}
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)})
-    return {"output": "Osiągnięto limit kroków. Doprecyzuj pytanie lub sprawdź podglądy.",
-            "proposals": proposals, "candidates": list(candidates.values())}
+    return finish("Osiągnięto limit kroków. Doprecyzuj pytanie lub sprawdź podglądy.")
