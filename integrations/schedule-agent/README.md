@@ -46,3 +46,14 @@ DATABASE_URL=sqlite:////tmp/schedule-test.db ODYSSEUS_DATA_DIR=/tmp/ody-schedule
 Verified against a staging schedule gateway and the user's local
 `google/gemma-4-26b-a4b-qat`: read, two existing makeup candidates, and one
 unconfirmed private room preview. This branch contains no live keys or data.
+
+## Semantic schedule tools
+
+Signed gateway selection is authoritative for faculty, groups and additional groups.
+The bridge supports find_subjects, get_next_occurrence, get_my_schedule and
+find_makeup_options. Query/makeup replies preserve the backend message and expose
+evidence; backend-checked makeup conflicts are retained. Missing reads trigger one
+retry and a clear unverified response instead of a claim that no events exist.
+
+Bridge tests use controlled model responses. The new real Gemma conversation test
+is deferred at the user's request because the local model endpoint is offline.
