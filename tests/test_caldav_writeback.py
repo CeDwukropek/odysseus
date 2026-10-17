@@ -25,7 +25,7 @@ class FakeEvent:
     def __init__(self, url="https://p69-caldav.icloud.com/123/calendars/home/evt-1.ics"):
         self.url = url
         self.etag = '"abc123"'
-        self.data = "OLD"
+        self.data = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:evt-1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
         self.saved = False
         self.deleted = False
 
@@ -45,7 +45,8 @@ class FakeCalendar:
 
     def event_by_uid(self, uid):
         if self._existing is None:
-            raise Exception("not found")
+            from caldav.lib.error import NotFoundError
+            raise NotFoundError("not found")
         return self._existing
 
     def save_event(self, ical):

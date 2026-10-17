@@ -15,6 +15,7 @@ from dateutil.rrule import rrulestr
 
 from core.database import SessionLocal, CalendarCal, CalendarDeletedEvent, CalendarEvent
 from src.auth_helpers import effective_user, require_user
+from src.calendar_defaults import default_calendar_id, resolve_calendar
 from src.upload_limits import read_upload_limited, ICS_MAX_BYTES
 from src.upload_handler import reserve_upload_references
 
@@ -149,33 +150,24 @@ def _resolve_base_uid(uid: str) -> str:
 
 
 async def _push_caldav_event_after_commit(owner: str, uid: str, action: str):
-    """Best-effort CalDAV write-through. Local writes stay authoritative if
-    the remote server is unreachable; pending flags let /sync retry later."""
+    """Return remote status without undoing an already committed local write."""
     try:
-        result = {"ok": True}
-        if action == "create":
-            from src.caldav_sync import push_event_create
-            result = await push_event_create(owner, uid)
-        elif action == "update":
-            from src.caldav_sync import push_event_update
-            result = await push_event_update(owner, uid)
-        elif action == "delete":
-            from src.caldav_sync import push_event_delete
-            result = await push_event_delete(owner, uid)
-        if result and not result.get("ok") and not result.get("skipped"):
-            raise RuntimeError(result.get("error") or result)
-    except Exception as e:
-        logger.warning("CalDAV %s push failed for uid=%s: %s", action, uid, e)
-        if action in {"create", "update"}:
-            db = SessionLocal()
-            try:
+        from src.caldav_sync import push_event_create, push_event_update, push_event_delete
+        result = await {"create": push_event_create, "update": push_event_update,
+                        "delete": push_event_delete}[action](owner, uid)
+        if result and result.get("ok") and not result.get("skipped"):
+            return {"status": "synced"}
+    except Exception:
+        logger.warning("CalDAV write failed; keeping pending operation", exc_info=True)
+    if action in {"create", "update"}:
+        try:
+            with SessionLocal() as db:
                 ev = _get_or_404_event(db, uid, owner)
                 ev.caldav_sync_pending = action
                 db.commit()
-            except Exception:
-                db.rollback()
-            finally:
-                db.close()
+        except Exception:
+            logger.warning("Could not persist pending calendar status", exc_info=True)
+    return {"status": "pending", "message": "Saved locally; remote calendar sync is pending. Use Sync to retry."}
 
 
 def _record_caldav_delete_tombstone(db, ev: CalendarEvent, owner: str) -> None:
@@ -1113,6 +1105,24 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             db.close()
 
 
+    @router.put("/default-calendar")
+    async def set_default_calendar(request: Request):
+        owner = _require_user(request)
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"calendar_href"}:
+            raise HTTPException(422, "Provide calendar_href only.")
+        reference = body["calendar_href"]
+        if reference is not None and (not isinstance(reference, str) or not reference.strip()):
+            raise HTTPException(422, "Choose a calendar or null to reset the default.")
+        if reference is not None:
+            with SessionLocal() as db:
+                resolve_calendar(db, owner, reference)
+        from routes.prefs_routes import _load_for_user, _save_for_user
+        prefs = _load_for_user(owner) or {}
+        prefs["default_calendar_href"] = reference
+        _save_for_user(owner, prefs)
+        return {"ok": True, "default_calendar_href": reference}
+
     @router.get("/calendars")
     async def list_calendars(request: Request):
         owner = _require_user(request)
@@ -1123,8 +1133,10 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             # Other callers commit it with the event they are creating.
             db.commit()
             cals = db.query(CalendarCal).filter(CalendarCal.owner == owner).all()
-            return {"calendars": [
-                {"name": c.name, "href": c.id, "color": c.color, "source": c.source}
+            selected_default = default_calendar_id(owner)
+            return {"default_calendar_href": selected_default, "calendars": [
+                {"name": c.name, "href": c.id, "color": c.color, "source": c.source,
+                 "is_default": c.id == selected_default}
                 for c in cals
             ]}
         except HTTPException:
@@ -1208,18 +1220,7 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         _reserve_calendar_uploads(request, data.color, data.description, data.location)
         db = SessionLocal()
         try:
-            cal = None
-            if data.calendar_href:
-                cal = db.query(CalendarCal).filter(CalendarCal.id == data.calendar_href).first()
-                # Reject calendars that aren't owned by the caller. The
-                # previous `if cal and cal.owner and ...` check silently
-                # passed null-owner (legacy) rows, letting any authenticated
-                # user write events into them. Same null-owner gate as
-                # `_get_or_404_calendar`.
-                if cal and (cal.owner is None or cal.owner != owner):
-                    raise HTTPException(404, "Calendar not found")
-            if not cal:
-                cal = _ensure_default_calendar(db, owner)
+            cal = resolve_calendar(db, owner, data.calendar_href)
 
             uid = str(uuid.uuid4())
             # Use the tz-detecting parser so events posted with an offset
@@ -1252,9 +1253,10 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             )
             db.add(ev)
             db.commit()
+            sync = {"status": "local"}
             if cal.source == "caldav":
-                await _push_caldav_event_after_commit(owner, uid, "create")
-            return {"ok": True, "uid": uid}
+                sync = await _push_caldav_event_after_commit(owner, uid, "create")
+            return {"ok": True, "uid": uid, "calendar_href": cal.id, "sync": sync}
         except HTTPException:
             raise
         except Exception as e:
@@ -1304,9 +1306,10 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             if is_caldav:
                 ev.caldav_sync_pending = "update"
             db.commit()
+            sync = {"status": "local"}
             if is_caldav:
-                await _push_caldav_event_after_commit(owner, base_uid, "update")
-            return {"ok": True}
+                sync = await _push_caldav_event_after_commit(owner, base_uid, "update")
+            return {"ok": True, "sync": sync}
         except HTTPException:
             raise
         except Exception as e:
@@ -1339,16 +1342,18 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
                 if is_caldav:
                     ev.caldav_sync_pending = "update"
                 db.commit()
+                sync = {"status": "local"}
                 if is_caldav:
-                    await _push_caldav_event_after_commit(owner, base_uid, "update")
-                return {"ok": True, "scope": "occurrence", "exdate": key}
+                    sync = await _push_caldav_event_after_commit(owner, base_uid, "update")
+                return {"ok": True, "scope": "occurrence", "exdate": key, "sync": sync}
             if is_caldav:
                 _record_caldav_delete_tombstone(db, ev, owner)
             db.delete(ev)
             db.commit()
+            sync = {"status": "local"}
             if is_caldav:
-                await _push_caldav_event_after_commit(owner, base_uid, "delete")
-            return {"ok": True}
+                sync = await _push_caldav_event_after_commit(owner, base_uid, "delete")
+            return {"ok": True, "sync": sync}
         except HTTPException:
             raise
         except Exception as e:
