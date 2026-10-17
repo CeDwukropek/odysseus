@@ -29,6 +29,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
         _push_caldav_event_after_commit,
         _record_caldav_delete_tombstone,
     )
+    from src.calendar_defaults import default_calendar_id, resolve_calendar
     import uuid as _uuid
 
     try:
@@ -200,7 +201,8 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             # event creation commits it in the event's transaction instead.
             db.commit()
             cals = _calendar_query().all()
-            result = [{"name": c.name, "href": c.id} for c in cals]
+            result = [{"name": c.name, "href": c.id, "source": c.source,
+                       "is_default": c.id == default_calendar_id(owner)} for c in cals]
             if result:
                 lines = [f"Found {len(result)} calendar(s):"]
                 for c in result:
@@ -307,26 +309,8 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             if not summary or not dtstart_str:
                 return {"error": "summary and dtstart are required", "exit_code": 1}
 
-            # Accept either an href OR a calendar name/short-id like "Main"
-            # or "62e545d8" — saves the model from having to memorize hrefs
-            # after a `list_calendars` call returned short prefixes.
             cal_href = args.get("calendar_href") or args.get("calendar")
-            cal = None
-            if cal_href:
-                cal = (_calendar_query()
-                       .filter(CalendarCal.id == cal_href)
-                       .first())
-                if not cal:
-                    # Try by name (case-insensitive) or by short-id prefix
-                    cal = (_calendar_query()
-                           .filter(CalendarCal.name.ilike(cal_href))
-                           .first())
-                if not cal:
-                    cal = (_calendar_query()
-                           .filter(CalendarCal.id.like(f"{cal_href}%"))
-                           .first())
-            if not cal:
-                cal = _ensure_default_calendar(db, owner)
+            cal = resolve_calendar(db, owner, cal_href, allow_names=True)
 
             all_day = bool(args.get("all_day", False))
             try:
@@ -452,8 +436,10 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                     dtstart_is_utc and not all_day,
                 )
             db.commit()
+            sync = {"status": "local"}
             if cal.source == "caldav":
-                await _push_caldav_event_after_commit(owner, uid, "create")
+                sync = await _push_caldav_event_after_commit(owner, uid, "create")
+            sync_blurb = " Saved locally; remote sync is pending. Do not create a duplicate." if sync and sync.get("status") == "pending" else ""
             tag_blurb = f" [{event_type}]" if event_type else ""
             if minutes_before is None:
                 reminder_blurb = ""
@@ -465,7 +451,8 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             # that opens the calendar on that day. See the markdown
             # anchor convention ([Name](#event-<uid>)).
             return {
-                "response": f"Created event [{summary}](#event-{uid}){tag_blurb} on {dtstart_str}{reminder_blurb}",
+                "response": f"Created event [{summary}](#event-{uid}){tag_blurb} on {dtstart_str}{reminder_blurb}.{sync_blurb}",
+                "calendar_href": cal.id, "sync": sync,
                 "uid": uid,
                 "anchor": f"[{summary}](#event-{uid})",
                 "reminder_note_id": reminder_note_id,
@@ -530,9 +517,11 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             if is_caldav:
                 ev.caldav_sync_pending = "update"
             db.commit()
+            sync = {"status": "local"}
             if is_caldav:
-                await _push_caldav_event_after_commit(owner, base_uid, "update")
-            return {"response": f"Updated event {uid}", "exit_code": 0}
+                sync = await _push_caldav_event_after_commit(owner, base_uid, "update")
+            note = " Saved locally; remote sync is pending." if sync and sync.get("status") == "pending" else ""
+            return {"response": f"Updated event {uid}.{note}", "sync": sync, "exit_code": 0}
 
         elif action == "delete_event":
             uid = args.get("uid")
@@ -550,9 +539,11 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 _record_caldav_delete_tombstone(db, ev, owner)
             db.delete(ev)
             db.commit()
+            sync = {"status": "local"}
             if is_caldav:
-                await _push_caldav_event_after_commit(owner, base_uid, "delete")
-            return {"response": f"Deleted event {uid}", "exit_code": 0}
+                sync = await _push_caldav_event_after_commit(owner, base_uid, "delete")
+            note = " Remote deletion is pending." if sync and sync.get("status") == "pending" else ""
+            return {"response": f"Deleted event {uid}.{note}", "sync": sync, "exit_code": 0}
 
         else:
             return {

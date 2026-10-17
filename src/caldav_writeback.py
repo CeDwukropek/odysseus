@@ -18,7 +18,7 @@ network.
 
 import asyncio
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -134,9 +134,10 @@ def push_event(calendars, local_cal_id: str, ev: dict, *, delete: bool = False,
         return {"ok": False, "error": "remote calendar not found"}
     remote_url = str(getattr(remote, "url", "") or "")
 
+    from caldav.lib.error import NotFoundError
     try:
         existing = remote.event_by_uid(uid)
-    except Exception:
+    except NotFoundError:
         existing = None
 
     if delete:
@@ -176,14 +177,15 @@ def _discover_calendars(client):
     same strategy as the pull path."""
     from caldav.lib.error import AuthorizationError, NotFoundError
     try:
-        return client.principal().calendars()
+        calendars = client.principal().calendars()
+        if calendars:
+            return calendars
     except (AuthorizationError, NotFoundError):
         raise
     except Exception:
-        try:
-            return [client.calendar(url=str(client.url))]
-        except Exception:
-            return []
+        pass
+    from src.caldav_sync import _open_url_as_calendar
+    return [_open_url_as_calendar(client, str(client.url))]
 
 
 def _writeback_blocking(local_cal_id, ev, delete, url, username, password,

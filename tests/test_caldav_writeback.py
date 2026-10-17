@@ -45,7 +45,8 @@ class FakeCalendar:
 
     def event_by_uid(self, uid):
         if self._existing is None:
-            raise Exception("not found")
+            from caldav.lib.error import NotFoundError
+            raise NotFoundError("not found")
         return self._existing
 
     def save_event(self, ical):
