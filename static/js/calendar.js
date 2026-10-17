@@ -205,7 +205,7 @@ async function _fetchCalendars() {
 // no-op silently if CalDAV isn't configured.
 async function _syncCaldav(interactive) {
   try {
-    const res = await fetch(`${API_BASE}/api/calendar/sync?direction=both`, {
+    const res = await fetch(`${API_BASE}/api/calendar/sync?direction=${interactive ? 'both' : 'pull'}`, {
       method: 'POST', credentials: 'same-origin',
     });
     const raw = await res.json().catch(() => ({}));
@@ -933,7 +933,7 @@ function _headerHTML() {
         ).join('')}
       </div>
       <button class="cal-nav" id="cal-settings" title="Calendar settings" style="position:relative;top:-3px;"><svg width="13" height="13" style="position:relative;top:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.68 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-      <button class="cal-nav${window._calSyncing ? ' cal-syncing' : ''}${window._calSyncDone ? ' cal-sync-done' : ''}" id="cal-sync" title="Refresh from database" style="position:relative;top:-3px;">${window._calSyncDone ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>'}</button>
+      <button class="cal-nav${window._calSyncing ? ' cal-syncing' : ''}${window._calSyncDone ? ' cal-sync-done' : ''}" id="cal-sync" title="Synchronize calendars" style="position:relative;top:-3px;">${window._calSyncDone ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>'}</button>
       ${_filtersToggleHTML()}
       <button class="cal-add-btn cal-add-btn-text" id="cal-add" title="New event"><span class="cal-add-plus">+</span><span class="cal-add-label">New</span></button>
     </div>
@@ -2227,7 +2227,16 @@ function _wireAll(body) {
       ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
       : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
     const minSpin = new Promise(r => setTimeout(r, 700));
+    let syncFailed = false;
     try {
+      if (_calendars.some(c => c.source === 'caldav')) {
+        const result = await _syncCaldav(true);
+        if (result?.errors?.length) {
+          syncFailed = true;
+          uiModule.showError('Calendar sync: ' + result.errors[0]);
+        }
+        await _fetchCalendars();
+      }
       await Promise.all([
         _fetchEvents(_range[0], _range[1], /*force*/ true).catch(() => {}),
         minSpin,
@@ -2238,13 +2247,13 @@ function _wireAll(body) {
       // template reads (not a one-off innerHTML on the button), so a stray
       // _render() — the calendar re-renders mid-flow — can't wipe it. Same
       // reason the spin is flag-driven.
-      window._calSyncDone = true;
+      window._calSyncDone = !syncFailed;
       _render();
       setTimeout(() => {
         window._calSyncDone = false;
         if (_open) _render();
       }, 900);
-      if (uiModule?.showToast) uiModule.showToast('Calendar refreshed');
+      if (!syncFailed && uiModule?.showToast) uiModule.showToast('Calendar synchronized');
     }
   });
   // Brief spin on the "+" glyph before the new-event form opens. The

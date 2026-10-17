@@ -18,9 +18,13 @@ operation keeps the local write and retry marker, and the agent response/UI
 explains that remote synchronization is pending. Do not retry creation as a new
 event: use Sync to retry the original UID.
 
-The UI now requests `/api/calendar/sync?direction=both`: pending writes/deletions
-are pushed before pulling remote events. Counts and errors from both directions
+The Sync buttons now request `/api/calendar/sync?direction=both`: pending writes/deletions
+are pushed before pulling remote events. Automatic opening remains pull-only.
+Counts and errors from both directions
 are shown. The API default direction remains pull for backwards compatibility.
+Updates preserve remote attendees, organizer, alarms, custom properties, existing
+exclusions and detached recurrence instances rather than rebuilding the complete
+remote resource. Malformed or non-unique masters fail without overwriting it.
 Write discovery also handles an empty principal response and maps Google principal
 URLs to event collections, as pull already did. A lookup failure is treated as
 an error; only NotFoundError means the event is absent, preventing accidental
@@ -28,7 +32,7 @@ recreation or false confirmation of remote deletion on network/auth failures.
 
 ## Verification
 
-Calendar/CalDAV regression suite: 166 tests passed on 17 October 2026. This covers
+Calendar/CalDAV regression suite: 168 tests passed on 17 October 2026. This covers
 persistent defaults, explicit selection precedence, account isolation, stale
 selection, HTTP/agent writes, pending status, retries, Google discovery, timezone
 handling, recurrence and client cleanup. The exact deployment image with local

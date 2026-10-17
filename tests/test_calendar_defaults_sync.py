@@ -118,3 +118,38 @@ def test_google_empty_discovery_opens_events_and_lookup_failure_is_not_absence()
         def save_event(self,data): pytest.fail('must not recreate after lookup failure')
     with pytest.raises(AuthorizationError):
         push_event([Remote()], _stable_cal_id(Remote.url), {'uid':'test'})
+
+
+def test_remote_update_preserves_attendees_alarms_and_detached_occurrences():
+    from src.caldav_writeback import merge_remote_event, build_event_ical
+    from icalendar import Calendar
+    original = "\r\n".join([
+        "BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT", "UID:series",
+        "SUMMARY:Old", "DTSTART:20261019T090000Z", "DTEND:20261019T100000Z",
+        "ORGANIZER:mailto:owner@example.com", "ATTENDEE:mailto:guest@example.com",
+        "EXDATE:20261026T090000Z", "X-CUSTOM:keep", "BEGIN:VALARM",
+        "ACTION:DISPLAY", "TRIGGER:-PT10M", "DESCRIPTION:Reminder", "END:VALARM",
+        "END:VEVENT", "BEGIN:VEVENT", "UID:series", "RECURRENCE-ID:20261102T090000Z",
+        "DTSTART:20261102T110000Z", "DTEND:20261102T120000Z", "SUMMARY:Exception",
+        "END:VEVENT", "END:VCALENDAR", ""
+    ])
+    replacement = build_event_ical({
+        'uid':'series', 'summary':'New', 'dtstart':datetime(2026,10,19,9),
+        'dtend':datetime(2026,10,19,10), 'is_utc':True,
+        'recurrence_exdates':['2026-11-09T09:00']
+    })
+    result = Calendar.from_ical(merge_remote_event(original,replacement,'series'))
+    events=result.walk('VEVENT');master=events[0]
+    assert len(events)==2
+    assert str(master['SUMMARY'])=='New'
+    assert str(master['ATTENDEE'])=='mailto:guest@example.com'
+    assert master.get('ORGANIZER')
+    assert str(master['X-CUSTOM'])=='keep'
+    assert master.walk('VALARM')
+    assert len(master.get('EXDATE'))==2
+    assert str(events[1]['SUMMARY'])=='Exception'
+
+
+def test_malformed_remote_calendar_is_not_overwritten():
+    from src.caldav_writeback import merge_remote_event
+    with pytest.raises(ValueError): merge_remote_event('invalid','invalid','event')

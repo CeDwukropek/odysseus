@@ -116,6 +116,34 @@ def _resource_etag(obj) -> str:
         return ""
 
 
+def merge_remote_event(existing_ical: str, replacement_ical: str, uid: str) -> str:
+    """Replace fields owned by Odysseus, retaining server metadata and overrides."""
+    from icalendar import Calendar
+    original = Calendar.from_ical(existing_ical)
+    replacement = Calendar.from_ical(replacement_ical)
+    masters = [event for event in original.walk("VEVENT")
+               if str(event.get("UID", "")) == uid and not event.get("RECURRENCE-ID")]
+    if len(masters) != 1:
+        raise ValueError("Remote event has no unique series master; remote data was left unchanged")
+    master = masters[0]
+    incoming = next(event for event in replacement.walk("VEVENT") if str(event.get("UID", "")) == uid)
+    for key in ("SUMMARY", "DESCRIPTION", "LOCATION", "DTSTART", "DTEND", "DURATION", "RRULE"):
+        master.pop(key, None)
+        if key in incoming:
+            master[key] = incoming[key]
+    # Pull does not yet import all remote EXDATEs; never erase those when adding
+    # a local cancellation. Detached occurrences and VALARMs stay intact too.
+    current = master.get("EXDATE", [])
+    current = current if isinstance(current, list) else [current]
+    additional = incoming.get("EXDATE", [])
+    additional = additional if isinstance(additional, list) else [additional]
+    for value in additional:
+        if value.to_ical() not in {item.to_ical() for item in current}:
+            master.add("EXDATE", value, encode=False)
+            current.append(value)
+    return original.to_ical().decode("utf-8")
+
+
 def push_event(calendars, local_cal_id: str, ev: dict, *, delete: bool = False,
                owner: str = "", account_id: str = "") -> dict:
     """Create/update (or delete) ``ev`` on the matching remote calendar.
@@ -153,7 +181,7 @@ def push_event(calendars, local_cal_id: str, ev: dict, *, delete: bool = False,
 
     ical = build_event_ical(ev)
     if existing is not None:
-        existing.data = ical
+        existing.data = merge_remote_event(existing.data, ical, uid)
         existing.save()
         return {
             "ok": True,
