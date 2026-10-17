@@ -32,6 +32,18 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
 # OpenAI-compatible function tool schemas
 # ---------------------------------------------------------------------------
 FUNCTION_TOOL_SCHEMAS = [
+    {"type":"function","function":{
+        "name":"manage_microsoft_todo",
+        "description":"Manage Microsoft To Do / Samsung Reminder tasks on the user's configured list. Use for explicit Samsung Reminder or Microsoft To Do requests; do not duplicate as a local note or calendar event. Connection and list selection happen in Settings, never ask for tokens. Read task IDs before modifying/deleting. Date-times require an explicit UTC offset. For 'remind me at' set remind_at; due_at alone does not enable an alert. Microsoft success does not confirm delivery to the phone.",
+        "parameters":{"type":"object","additionalProperties":False,"properties":{
+            "action":{"type":"string","enum":["list_tasks","create_task","update_task","complete_task","delete_task"]},
+            "task_id":{"type":"string","description":"ID from list_tasks; required for update/complete/delete."},
+            "title":{"type":"string","maxLength":500},"notes":{"type":"string","maxLength":10000},
+            "due_at":{"type":["string","null"],"description":"ISO datetime with offset; null removes the deadline."},
+            "remind_at":{"type":["string","null"],"description":"ISO datetime with offset for phone reminder; null disables reminder."},
+            "cursor":{"type":"string","description":"next_cursor from list_tasks, for the next page only."}
+        },"required":["action"]}
+    }},
     {
         "type": "function",
         "function": {

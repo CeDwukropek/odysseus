@@ -262,6 +262,9 @@ _register(
 )
 
 
+_register({"manage_microsoft_todo"}, ToolEffect.WRITE_PRIVATE, ToolEffect.NETWORK_EGRESS,
+          result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED)
+
 TOOL_CAPABILITIES: Mapping[str, ToolCapabilities] = MappingProxyType(dict(_REGISTRY))
 KNOWN_CAPABILITY_TOOLS = frozenset(TOOL_CAPABILITIES)
 
@@ -315,6 +318,7 @@ def capabilities_for_tool(tool_name: Any) -> ToolCapabilities:
 _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "manage_calendar": frozenset({"list_calendars", "list_events"}),
+        "manage_microsoft_todo": frozenset({"list_tasks"}),
         "manage_contact": frozenset({"list"}),
         "manage_documents": frozenset({"list", "read", "view", "open", "get"}),
         "manage_memory": frozenset({"list", "search"}),
@@ -331,6 +335,7 @@ _PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
         "manage_calendar": frozenset(
             {"create_event", "update_event", "delete_event"}
         ),
+        "manage_microsoft_todo": frozenset({"create_task", "update_task", "complete_task", "delete_task"}),
         "manage_contact": frozenset({"add", "update", "edit", "delete"}),
         "manage_documents": frozenset({"delete", "tidy"}),
         "manage_memory": frozenset({"add", "edit", "delete"}),
@@ -356,6 +361,7 @@ _PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
 _ACTION_DESTRUCTIVE: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "manage_calendar": frozenset({"delete_event"}),
+        "manage_microsoft_todo": frozenset({"delete_task"}),
         "manage_contact": frozenset({"delete"}),
         "manage_documents": frozenset({"delete", "tidy"}),
         "manage_endpoints": frozenset({"delete"}),
@@ -376,6 +382,7 @@ _ACTION_DESTRUCTIVE: Mapping[str, frozenset[str]] = MappingProxyType(
 _ACTION_DEFAULTS: Mapping[str, str] = MappingProxyType(
     {
         "manage_calendar": "list_events",
+        "manage_microsoft_todo": "list_tasks",
         "manage_documents": "list",
         "manage_research": "list",
         "manage_tasks": "list",

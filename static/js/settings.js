@@ -3356,6 +3356,7 @@ async function initIntegrations() {
 /* ══ Unified Integrations ══ */
 
 const INTG_TYPES = {
+  microsoft_todo: {label:"Microsoft To Do",icon:"✓"},
   api:     { label: 'API',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>' },
   caldav:  { label: 'CalDAV',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>' },
   contacts: { label: 'Contacts', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
@@ -3457,7 +3458,7 @@ async function initUnifiedIntegrations() {
   }
 
   async function fetchAll() {
-    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, tokenRes, calendarsRes] = await Promise.all([
+    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, tokenRes, calendarsRes, todoRes] = await Promise.all([
       fetch('/api/auth/integrations', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { integrations: [] }).catch(() => ({ integrations: [] })),
       fetch('/api/calendar/config/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
       fetch('/api/contacts/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
@@ -3467,8 +3468,10 @@ async function initUnifiedIntegrations() {
       fetch('/api/vault/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
       fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
       fetch('/api/calendar/calendars', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { calendars: [] }).catch(() => ({ calendars: [] })),
+      fetch('/api/microsoft-todo/status', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
     ]);
     const items = [];
+    if(todoRes.connected)items.push({type:'microsoft_todo',id:'microsoft-todo',name:'Microsoft To Do / Samsung Reminder',detail:esc(todoRes.default_list_name||'Choose a list'),enabled:true,data:todoRes});
     // API integrations
     for (const intg of (apiRes.integrations || [])) {
       items.push({ type: 'api', id: intg.id, name: intg.name || 'Unnamed', detail: intg.base_url || '', enabled: intg.enabled !== false, data: intg });
@@ -3590,6 +3593,7 @@ async function initUnifiedIntegrations() {
         const id = btn.dataset.intgId;
         try {
           if (type === 'api') await fetch(`/api/auth/integrations/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'microsoft_todo') await fetch('/api/microsoft-todo/connection', {method:'DELETE',credentials:'same-origin'});
           else if (type === 'caldav') await fetch(`/api/calendar/config/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'contacts') {
             await fetch('/api/contacts/clear', { method: 'DELETE', credentials: 'same-origin' });
@@ -3611,7 +3615,8 @@ async function initUnifiedIntegrations() {
 
   function showForm(type, editId) {
     formEl.style.display = '';
-    if (type === 'api') showApiForm(editId);
+    if (type === 'microsoft_todo') showMicrosoftTodoForm();
+    else if (type === 'api') showApiForm(editId);
     else if (type === 'caldav') showCalDavForm(editId);
     else if (type === 'contacts' || type === 'carddav') showCardDavForm();
     else if (type === 'email') showEmailForm(editId);
@@ -3619,6 +3624,89 @@ async function initUnifiedIntegrations() {
     else if (type === 'codex') showAgentForm('codex', editId);
     else if (type === 'claude') showAgentForm('claude', editId);
     else if (type === 'vault') showVaultForm();
+  }
+
+  async function showMicrosoftTodoForm() {
+    formEl.innerHTML = `<div id="uf-todo-panel" style="padding:12px;border:1px solid var(--border);border-radius:8px;display:grid;gap:10px;">
+      <strong>Microsoft To Do / Samsung Reminder</strong>
+      <p>Connect your Microsoft account, then select the same list in Samsung Reminder → Settings → Sync with Microsoft To Do. Tasks remain in Microsoft To Do.</p>
+      <label>Application (client) ID <input id="uf-todo-client" class="cal-input" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off"></label>
+      <small>Create a public-client app in Microsoft Entra with delegated Tasks.ReadWrite permission and public client flows enabled. No client secret is needed. <a href="https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app" target="_blank" rel="noopener noreferrer">Microsoft setup guide</a></small>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;"><button type="button" class="admin-btn-add" id="uf-todo-login">Connect Microsoft account</button><button type="button" class="admin-btn-add" id="uf-todo-disconnect">Disconnect</button><button type="button" class="admin-btn-add" id="uf-todo-close">Close</button></div>
+      <div id="uf-todo-status" role="status" aria-live="polite"></div>
+      <div id="uf-todo-device" hidden><a href="https://microsoft.com/devicelogin" target="_blank" rel="noopener noreferrer">Open Microsoft sign-in</a><p>Enter this code: <strong id="uf-todo-code"></strong>. Check that Microsoft shows your own app name before granting access.</p></div>
+      <label>List synced with Samsung <select id="uf-todo-list" class="cal-input"><option value="">Connect first</option></select></label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;"><button type="button" class="admin-btn-add" id="uf-todo-lists">Refresh lists</button><button type="button" class="admin-btn-add" id="uf-todo-save">Use selected list</button><button type="button" class="admin-btn-add" id="uf-todo-preview">Read tasks</button></div>
+      <div id="uf-todo-tasks"></div>
+      <small>Disconnect removes Odysseus credentials, not your tasks. You can revoke consent in your Microsoft account. Samsung-specific features may not sync.</small>
+    </div>`;
+    const panel=el('uf-todo-panel'), statusEl=el('uf-todo-status'), select=el('uf-todo-list');
+    const active=()=>formEl.style.display!=='none' && el('uf-todo-panel')===panel;
+    const api=async(path,method='GET',body)=>{
+      const res=await fetch('/api/microsoft-todo'+path,{method,credentials:'same-origin',
+        ...(body?{headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{})});
+      const data=await res.json();
+      if (!res.ok) throw new Error(typeof data.detail==='string'?data.detail:'Microsoft To Do request failed');
+      return data;
+    };
+    const loadLists=async()=>{
+      const [state,data]=await Promise.all([api('/status'),api('/lists')]);
+      if(!active())return;
+      select.replaceChildren(new Option('Choose the list synced on your phone',''));
+      for(const row of data.lists||[])if(row.is_owner!==false)select.add(new Option(row.name,row.id));
+      select.value=state.default_list_id||'';
+    };
+    try {
+      const state=await api('/status');
+      if(!active())return;
+      el('uf-todo-client').value=state.client_id||'';
+      statusEl.textContent=state.connected?'Connected to Microsoft. Select the Samsung-synced list.':'Not connected.';
+      if(state.connected)await loadLists();
+    } catch(error){statusEl.textContent=error.message;}
+    el('uf-todo-close').onclick=()=>{formEl.style.display='none';formEl.replaceChildren();};
+    el('uf-todo-login').onclick=async()=>{
+      const button=el('uf-todo-login');button.disabled=true;
+      try {
+        const login=await api('/login/start','POST',{client_id:el('uf-todo-client').value.trim()});
+        if(!active())return;
+        el('uf-todo-code').textContent=login.user_code;el('uf-todo-device').hidden=false;
+        statusEl.textContent='Complete sign-in in the Microsoft window. Waiting…';
+        let interval=login.interval||5;const end=Date.now()+login.expires_in*1000;
+        while(active()&&Date.now()<end){
+          await new Promise(resolve=>setTimeout(resolve,interval*1000));
+          if(!active())return;
+          const result=await api('/login/poll','POST',{poll_id:login.poll_id});
+          if(!active())return;
+          if(result.status==='connected'){
+            el('uf-todo-device').hidden=true;statusEl.textContent='Connected. Choose and save your list.';
+            await loadLists();await renderList();return;
+          }
+          interval=result.interval||interval;
+        }
+        if(active())statusEl.textContent='Sign-in expired. Connect again.';
+      }catch(error){if(active())statusEl.textContent=error.message;}
+      finally{if(active())button.disabled=false;}
+    };
+    el('uf-todo-lists').onclick=async()=>{try{await loadLists();}catch(error){statusEl.textContent=error.message;}};
+    el('uf-todo-save').onclick=async()=>{
+      try{
+        if(!select.value)throw new Error('Choose a list first.');
+        await api('/default-list','PUT',{list_id:select.value});statusEl.textContent='List saved. Choose the same list in Samsung Reminder.';
+        await renderList();
+      }catch(error){statusEl.textContent=error.message;}
+    };
+    el('uf-todo-preview').onclick=async()=>{
+      try{
+        const data=await api('/tasks');if(!active())return;
+        const container=el('uf-todo-tasks');container.replaceChildren();
+        for(const task of data.tasks||[]){const row=document.createElement('div');row.textContent=(task.status==='completed'?'✓ ':'○ ')+task.title;container.appendChild(row);}
+        statusEl.textContent=data.next_cursor?'First 50 tasks shown; more are available.':`${(data.tasks||[]).length} tasks read from Microsoft.`;
+      }catch(error){statusEl.textContent=error.message;}
+    };
+    el('uf-todo-disconnect').onclick=async()=>{
+      try{await api('/connection','DELETE');formEl.replaceChildren();formEl.style.display='none';await renderList();}
+      catch(error){statusEl.textContent=error.message;}
+    };
   }
 
   // ── API form ──
@@ -5513,6 +5601,7 @@ async function initUnifiedIntegrations() {
   if (addBtn) {
     const _typeOptions = [
       ['api', 'API Service'],
+      ['microsoft_todo', 'Microsoft To Do / Samsung Reminder'],
       ['caldav', 'CalDAV Calendar'],
       ['claude', 'Claude Agent'],
       ['codex', 'Codex Agent'],

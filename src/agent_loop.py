@@ -530,7 +530,7 @@ _DOMAIN_TOOL_MAP = {
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
-    "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
+    "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks", "manage_microsoft_todo"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
@@ -737,6 +737,7 @@ Bulk delete/archive/mark emails. Use this for "delete all those" after listing e
     "mark_email_read": "- ```mark_email_read``` — Mark one email read/unread. Args (JSON): {\"uid\":\"...\", \"read\":true, \"folder\":\"INBOX\", \"account\":\"Gmail\"}. For multiple messages use bulk_email.",
     "resolve_contact": "- ```resolve_contact``` — Look up a contact's email by name. Searches CardDAV address book + sent email history. Args (JSON): {\"name\": \"...\"}. Use BEFORE send_email when the user gives only a name.",
     "manage_contact": "- ```manage_contact``` — Create/update/delete/list CardDAV contacts. Args (JSON): {\"action\": \"list|add|update|delete\", \"name\": \"...\", \"email\": \"...\", \"phones\": [...], \"address\": \"...\", \"uid\": \"...\"}. Use for info about another person: email, phone, postal address. For 'save this for <person>' / address paste / phone next to a name, use this — NOT manage_memory. Do NOT use for user identity facts ('my name is X'); those are manage_memory. For update/delete, call action=list first for the uid.",
+    "manage_microsoft_todo": """Use for explicit Samsung Reminder / Microsoft To Do requests. Read task IDs before editing. Uses the list selected in Settings. For a timed reminder set remind_at with an explicit UTC offset. Never duplicate the task as a local note/calendar event. A successful API result confirms Microsoft To Do only; the phone must sync separately.\n""",
     "manage_calendar": """\
 ```manage_calendar
 {"action": "create_event", "summary": "<event title>", "dtstart": "<natural language or ISO datetime>"}
@@ -1875,6 +1876,7 @@ def _minimal_odysseus_notes_messages(messages: List[Dict]) -> List[Dict]:
     system = (
         "You are Odysseus. Handle notes, reminders, calendar events, and scheduled tasks.\n"
         "Use manage_notes for notes, todos, checklists, note searches, and one-off reminders. One-off reminders need due_date.\n"
+        "Use manage_microsoft_todo for explicit Samsung Reminder or Microsoft To Do requests; do not duplicate those as local notes.\n"
         "Use manage_calendar for calendar events, meetings, appointments, event lists, and event reminders. For event reminders, use reminder_minutes and do not also create a note.\n"
         "Use manage_tasks for recurring/background automations like every morning, daily, weekly, or scheduled AI jobs.\n"
         "For casual chat, answer briefly with no tool.\n"

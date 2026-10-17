@@ -49,7 +49,7 @@ ALWAYS_AVAILABLE = frozenset({
 ASSISTANT_ALWAYS_AVAILABLE = frozenset({
     "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email",
     "bulk_email", "archive_email", "delete_email", "mark_email_read",
-    "manage_calendar", "manage_notes", "manage_tasks",
+    "manage_calendar", "manage_notes", "manage_tasks", "manage_microsoft_todo",
     "manage_memory", "web_search", "read_file",
     "create_document", "update_document",
     "resolve_contact", "search_chats",
@@ -67,6 +67,7 @@ COLLECTION_NAME = "odysseus_tool_index"
 # Each tool gets a searchable description that helps retrieval.
 # These are richer than the system prompt one-liners — they're for embedding.
 BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
+    "manage_microsoft_todo": "Samsung Reminder / Microsoft To Do tasks: read, create, edit, complete and delete reminders on the configured Microsoft list. Phone sync must be enabled. No local note/calendar duplicate.",
     "bash": "Run shell commands on the server. Install packages, git operations, builds, system info, process management. Prefer a dedicated tool whenever one fits the job (file read/write/edit, search, listing); use bash only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "python": "Execute Python code for computation, data processing, math, scripting, and parsing. Not for writing code for the user. Prefer a dedicated tool for reading, writing, or searching files; use python only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
@@ -346,6 +347,8 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
+        frozenset({"samsung", "microsoft to do", "microsoft todo", "to-do", "przypomnienia samsung"}):
+            {"manage_microsoft_todo"},
         # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then
