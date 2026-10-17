@@ -822,6 +822,9 @@ from routes.compare.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))
 
 # User Preferences
+from routes.microsoft_todo_routes import setup_microsoft_todo_routes
+app.include_router(setup_microsoft_todo_routes())
+
 from routes.prefs_routes import setup_prefs_routes
 app.include_router(setup_prefs_routes())
 

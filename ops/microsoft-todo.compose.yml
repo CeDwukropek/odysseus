@@ -1,0 +1,5 @@
+# Build the separately patched image first; keep existing project/env/volumes.
+services:
+  odysseus:
+    image: odysseus-todo:local
+    pull_policy: never
