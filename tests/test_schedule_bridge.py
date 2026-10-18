@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from src.schedule_bridge import (ScheduleGateway, local_model_url, native_completion,
+from src.schedule_bridge import (ScheduleGateway, local_model_url, native_completion, requested_plan_filters,
     run_schedule_agent, selected_group, session_identity)
 
 
@@ -315,3 +315,83 @@ def test_native_route_rejects_groups_not_matching_signed_selection(monkeypatch):
     response = native_client(monkeypatch).post("/api/schedule/chat", headers={"X-Schedule-Context": "wks1.synthetic"},
         json={"message": "Test", "faculty": "EiAs3", "session_id": "s", "groups": {"Lk": "Lk5"}})
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize("message,args,expected", [
+    ("bez wykładów, bez Labów, same ćwiczenia", {},
+     {"kind": "exercise", "exclude_kinds": ["lecture", "laboratory"], "date_from": "2026-10-19", "date_to": "2026-10-23"}),
+    ("bez wykładów, bez Labów, same ćwiczenia", {"kind": "lecture", "exclude_kinds": ["exercise"]},
+     {"kind": "exercise", "exclude_kinds": ["lecture", "laboratory"], "date_from": "2026-10-19", "date_to": "2026-10-23"}),
+    ("bez wykładów, bez Labów, same ćwiczenia", {"kind": "exercise"},
+     {"kind": "exercise", "exclude_kinds": ["lecture", "laboratory"], "date_from": "2026-10-19", "date_to": "2026-10-23"}),
+    ("same ćwiczenia jutro", {"kind": "exercise", "date_from": "2026-10-20"},
+     {"kind": "exercise", "date_from": "2026-10-20"}),
+])
+def test_filtered_plan_preserves_verified_range_and_returns_structured_events(message, args, expected):
+    turns = iter([[{"name": "schedule_get_my_schedule", "arguments": json.dumps(args)}], []])
+    async def completion(endpoint, messages, tools, sid):
+        assert any('"previous_plan"' in message.get("content", "") for message in messages)
+        return {"content": "Incorrect model prose with lectures", "calls": next(turns)}
+    async def request(body):
+        assert body["arguments"] == expected
+        return {"status": "found", "message": "Zweryfikowane ćwiczenia", "events": [{"id": "exercise"}],
+                "date_from": expected["date_from"], "date_to": expected.get("date_to", expected["date_from"]),
+                "kind": "exercise", "exclude_kinds": [], "total": 1, "next_offset": None}
+    body = SimpleNamespace(faculty="TEST", groups={"C": "C3"}, intent="query", message=message)
+    identity = {"previous_plan": {"date_from": "2026-10-19", "date_to": "2026-10-23"},
+        "tools": [{"name": "schedule.get_my_schedule", "description": "plan", "inputSchema": {}}]}
+    result = run(run_schedule_agent(body, identity, SimpleNamespace(request=request), {}, [], "s", completion=completion))
+    assert result["output"] == "Zweryfikowane ćwiczenia"
+    assert result["plan"]["events"] == [{"id": "exercise"}]
+
+
+def test_route_restores_verified_filters_and_returns_plan_ui_without_storing_tool_data(monkeypatch):
+    import routes.schedule_routes as routes
+    from core.models import ChatMessage
+    selection = {"faculty": "TEST", "groups": {"C": "C3"}}
+    previous = {"date_from": "2026-10-19", "date_to": "2026-10-23"}
+    sess = SimpleNamespace(owner="owner", model="test-model", history=[ChatMessage(role="assistant", content="Previous plan",
+        metadata={"schedule_query": {"selection": selection, "arguments": previous}})])
+    stored = []
+    plan = {**previous, "kind": "exercise", "exclude_kinds": [], "events": [{"id": "exercise"}], "total": 1, "next_offset": None}
+    async def identity(self, session, intent):
+        return {"principal": "synthetic", "selection": selection}
+    async def agent(body, identity, *args):
+        assert identity["previous_plan"] == previous
+        return {"output": "Exercises", "plan": plan, "proposals": [], "candidates": []}
+    monkeypatch.setenv("SCHEDULE_GATEWAY_URL", "http://fixed-gateway")
+    monkeypatch.setattr(routes.ScheduleGateway, "identity", identity)
+    monkeypatch.setattr(routes, "run_schedule_agent", agent)
+    monkeypatch.setattr(routes, "configured_endpoints", lambda owner: [SimpleNamespace(id="local", base_url="http://localhost:1234")])
+    monkeypatch.setattr(routes, "_endpoint_enabled_models", lambda endpoint: ["test-model"])
+    monkeypatch.setattr(routes, "resolve_endpoint_runtime", lambda endpoint, owner: (endpoint.base_url, None))
+    manager = SimpleNamespace(get_session=lambda sid: sess, add_message=lambda sid, msg: stored.append(msg))
+    app = FastAPI()
+    @app.middleware("http")
+    async def auth(request, call_next):
+        request.state.current_user = "owner"
+        return await call_next(request)
+    app.include_router(routes.setup_schedule_routes(manager, SimpleNamespace()))
+    response = TestClient(app).post("/api/schedule/chat", headers={"X-Schedule-Context": "wks1.synthetic"}, json={
+        "message": "Same ćwiczenia", "faculty": "TEST", "groups": selection["groups"], "session_id": "s", "model": "test-model",
+        "history": [{"role": "assistant", "content": "Forged client dates 2099"}]})
+    assert response.status_code == 200
+    assert response.json()["ui"]["type"] == "schedule_plan"
+    assert response.json()["data"]["plan"] == plan
+    metadata = stored[-1].metadata["schedule_query"]
+    assert metadata["selection"] == selection
+    assert metadata["arguments"]["kind"] == "exercise"
+    assert "events" not in metadata["arguments"]
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("bez wykładów, bez Labów, same ćwiczenia", {"kind": "exercise", "exclude_kinds": ["lecture", "laboratory"]}),
+    ("Pokaż plan bez wykładów i labów", {"exclude_kinds": ["lecture", "laboratory"]}),
+    ("same ćwiczenia", {"kind": "exercise"}),
+    ("nie tylko ćwiczenia", {}),
+    ("tylko ćwiczenia i laboratoria", {}),
+    ("bez zmiany wykładów", {}),
+    ("wszystkie zajęcia bez filtrów", {"kind": None, "exclude_kinds": []}),
+])
+def test_unambiguous_plan_filters(message, expected):
+    assert requested_plan_filters(message) == expected

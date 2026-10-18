@@ -1,7 +1,7 @@
 ---
 name: personal-schedule
 description: Odczyt planu, odrabianie istniejących zajęć i prywatne podglądy zmian.
-version: 1.1.0
+version: 1.2.0
 category: productivity
 tags: [schedule, university]
 status: published
@@ -21,6 +21,13 @@ grup i wybranej operacji. Używaj wyłącznie narzędzi przekazanych w żądaniu
      Bez dat: backend przeszukuje całe dostępne przyszłe dane. Nie pytaj o zgodę
      na krótszy zakres i nie dodawaj słowa „lab” do nazwy przedmiotu.
    - „Co mam jutro?” → schedule_get_my_schedule z datą jutra w Europe/Warsaw.
+   - „Same ćwiczenia” → schedule_get_my_schedule(kind="exercise"). „Bez wykładów
+     i labów” → exclude_kinds=["lecture", "laboratory"]. To filtry całego planu,
+     nie nazwy przedmiotów. Używaj ich w narzędziu, nie usuwaj pozycji tylko w tekście.
+   - Przy doprecyzowaniu wcześniejszego pytania zachowaj daty z previous_plan
+     i potrzebne wcześniejsze filtry; zmień tylko to, o co prosi użytkownik.
+     Nowy rodzaj zastosuj do całego tego okresu. Paginację zacznij od offset=0;
+     na kolejnych stronach zachowaj daty oraz filtry. Nie wracaj domyślnie do dziś.
    - „Chcę odrobić…” → schedule_find_makeup_options z nazwą i rodzajem zajęć.
      Backend zwraca rzeczywiste terminy oraz sprawdzone kolizje. Nie twórz override.
    - schedule_find_subjects służy do rozpoznania katalogu i niejednoznacznych nazw.

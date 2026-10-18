@@ -157,6 +157,11 @@ def setup_schedule_routes(session_manager, chat_processor):
                 sess.model = original_model
             history = [{"role": message.role, "content": message.content} for message in sess.history
                        if message.role in {"user", "assistant"} and isinstance(message.content, str)]
+            for message in reversed(sess.history):
+                prior = (message.metadata or {}).get("schedule_query")
+                if message.role == "assistant" and isinstance(prior, dict) and isinstance(prior.get("arguments"), dict) and prior.get("selection") == selection:
+                    identity = {**identity, "previous_plan": prior["arguments"]}
+                    break
             preface = []
             if body.use_memory:
                 # Explicit owner-scoped retrieval, no global skills or web tools.
@@ -166,6 +171,8 @@ def setup_schedule_routes(session_manager, chat_processor):
             try:
                 async with asyncio.timeout(180):
                     result = await run_schedule_agent(body, identity, gateway, runtime, history, sid, preface)
+                    if result.get("plan") is not None:
+                        result.update(ui={"type": "schedule_plan"}, data={"plan": result["plan"]})
                     if body.intent == "makeup" and result.get("slots"):
                         result.update(intent="SLOTS", ui={"type": "slot_choices", "actions": True}, data={"slots": result["slots"]})
                     elif body.intent == "makeup" and result.get("candidates"):
@@ -179,10 +186,14 @@ def setup_schedule_routes(session_manager, chat_processor):
                 raise HTTPException(503, "Agent nie odpowiedział. Sprawdź konfigurację wybranego modelu w Odysseusie.")
             result.pop("candidates", None)
             result.pop("slots", None)
-            # Only transcript text is retained. No delegated tokens or provider headers.
+            # Retain text and verified query filters, never delegated tokens,
+            # provider headers, opaque tool signatures or full tool results.
             session_manager.add_message(sid, ChatMessage(role="user", content=body.message))
+            plan = result.pop("plan", None)
+            query = {key: plan[key] for key in ("date_from", "date_to", "kind", "exclude_kinds") if plan.get(key) is not None} if plan is not None else None
             session_manager.add_message(sid, ChatMessage(role="assistant", content=result["output"],
-                metadata={"model": model, "schedule_integration": True}))
+                metadata={"model": model, "schedule_integration": True,
+                          **({"schedule_query": {"selection": selection, "arguments": query}} if query is not None else {})}))
             return {"ok": True, "native_session_id": sid,
                     "model_route": {"endpoint_id": endpoint.id, "model": model, **destination}, **result}
 
