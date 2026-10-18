@@ -69,6 +69,19 @@ def test_native_transport_parses_tools_and_never_exposes_context_token(monkeypat
     assert result["calls"][0]["name"] == "schedule_get_events"
 
 
+@pytest.mark.parametrize("upstream,status,fragment", [(404, 422, "niedostępny"),
+    (429, 429, "limit"), (403, 503, "uprawnienia")])
+def test_provider_errors_are_useful_without_leaking_raw_details(monkeypatch, upstream, status, fragment):
+    async def stream(*args, **kwargs):
+        yield 'event: error\ndata: '+json.dumps({"status": upstream, "raw": "synthetic-secret"})+'\n\n'
+    monkeypatch.setitem(sys.modules, "src.llm_core", SimpleNamespace(stream_llm=stream))
+    with pytest.raises(HTTPException) as error:
+        run(native_completion({"url": "https://api.openai.com/v1", "model": "test", "headers": {}}, [], [], "s"))
+    assert error.value.status_code == status
+    assert fragment in error.value.detail
+    assert "synthetic-secret" not in error.value.detail
+
+
 def test_makeup_uses_real_candidates_and_cannot_invoke_other_tools():
     executed, turns = [], iter([
         [{"name": "bash", "arguments": "{}"}, {"name": "schedule_create_override", "arguments": "{}"}],
@@ -146,7 +159,7 @@ def test_native_routes_require_chat_scope_and_human_owner(monkeypatch):
 
 def test_capabilities_report_local_destination_without_credentials(monkeypatch):
     import routes.schedule_routes as routes
-    row = SimpleNamespace(id="local", name="Own model server", api_key="synthetic-secret")
+    row = SimpleNamespace(id="local", name="Own model server", base_url="http://localhost:1234/v1", api_key="synthetic-secret")
     monkeypatch.setattr(routes, "configured_endpoints", lambda owner: [row])
     monkeypatch.setattr(routes, "_endpoint_enabled_models", lambda endpoint: ["test-model"])
     response = native_client(monkeypatch).get("/api/schedule/capabilities")
@@ -156,8 +169,8 @@ def test_capabilities_report_local_destination_without_credentials(monkeypatch):
     assert "synthetic-secret" not in response.text
 
 
-@pytest.mark.parametrize("base", ["https://api.openai.com/v1", "https://generativelanguage.googleapis.com/v1beta/openai"])
-def test_cloud_execution_remains_blocked_even_if_catalogue_is_incorrect(monkeypatch, base):
+@pytest.mark.parametrize("base", ["https://api.openai.com.evil.test/v1", "https://generativelanguage.googleapis.com.evil.test/v1beta/openai"])
+def test_unapproved_cloud_execution_remains_blocked_even_if_catalogue_is_incorrect(monkeypatch, base):
     import routes.schedule_routes as routes
     monkeypatch.setenv("SCHEDULE_GATEWAY_URL", "http://fixed-gateway")
     row = SimpleNamespace(id="cloud", base_url=base)
@@ -192,18 +205,22 @@ def test_native_route_rejects_origin_and_unconfigured_cloud_models(monkeypatch):
     assert calls == ["identity"]
 
 
-def test_native_route_keeps_only_text_history_and_binds_native_account(monkeypatch):
+@pytest.mark.parametrize("base,provider", [("http://127.0.0.1:1234", "local"),
+    ("https://api.openai.com/v1", "openai"), ("https://generativelanguage.googleapis.com/v1beta/openai", "google")])
+def test_native_route_keeps_only_text_history_and_binds_native_account(monkeypatch, base, provider):
     import routes.schedule_routes as routes
     import routes.chat_helpers as chat_helpers
     monkeypatch.setenv("SCHEDULE_GATEWAY_URL", "http://fixed-gateway")
-    row = SimpleNamespace(id="local", base_url="http://127.0.0.1:1234")
+    row = SimpleNamespace(id="local", base_url=base)
     monkeypatch.setattr(routes, "configured_endpoints", lambda owner: [row])
     monkeypatch.setattr(routes, "_endpoint_enabled_models", lambda row: ["local-model"])
     monkeypatch.setattr(routes, "resolve_endpoint_runtime", lambda row, owner: (row.base_url, "synthetic-provider"))
     monkeypatch.setattr(chat_helpers, "_enforce_chat_privileges", lambda *args: None)
     async def identity(self, session, intent):
         return {"principal": "firebase-a"}
-    async def agent(*args):
+    async def agent(body, identity, gateway, runtime, history, sid, preface):
+        assert runtime["headers"] == {"Authorization": "Bearer synthetic-provider"}
+        assert runtime["url"].startswith(base)
         return {"output": "Test response", "proposals": [], "candidates": []}
     monkeypatch.setattr(routes.ScheduleGateway, "identity", identity)
     monkeypatch.setattr(routes, "run_schedule_agent", agent)
@@ -221,9 +238,11 @@ def test_native_route_keeps_only_text_history_and_binds_native_account(monkeypat
         return await call_next(request)
     app.include_router(routes.setup_schedule_routes(manager, SimpleNamespace()))
     response = TestClient(app).post("/api/schedule/chat", headers={"X-Schedule-Context": "wks1.synthetic"}, json={
-        "message": "Test request", "faculty": "TEST", "session_id": "s", "model": "local-model"})
+        "message": "Test request", "faculty": "TEST", "session_id": "s", "endpoint_id": "local", "model": "local-model"})
     assert response.status_code == 200
     assert response.json()["native_session_id"] == session_identity("owner", "firebase-a", "s")
+    assert response.json()["model_route"]["provider"] == provider
+    assert "synthetic-provider" not in response.text
     assert [message.content for message in persisted] == ["Test request", "Test response"]
     assert "synthetic-provider" not in repr(persisted)
     assert "wks1" not in repr(persisted)
