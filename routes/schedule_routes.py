@@ -8,9 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from core.database import ModelEndpoint, SessionLocal
 from core.models import ChatMessage
 from src.auth_helpers import effective_user, owner_filter, require_chat_api_token_scope
-from src.endpoint_resolver import _endpoint_enabled_models, build_chat_url, build_headers, resolve_endpoint_runtime
+from src.endpoint_resolver import _endpoint_enabled_models, build_chat_url, build_headers, normalize_base, resolve_endpoint_runtime
+from src.schedule_models import chat_models, model_destination
 from src.schedule_bridge import (PROTOCOL, INTENTS, ScheduleGateway, _locks,
-                                 local_model_url, run_schedule_agent, session_identity)
+                                 run_schedule_agent, session_identity)
 
 
 class ScheduleChat(BaseModel):
@@ -40,7 +41,15 @@ def configured_endpoints(owner):
     with SessionLocal() as db:
         query = db.query(ModelEndpoint).filter(ModelEndpoint.id.in_(allowed), ModelEndpoint.is_enabled.is_(True))
         rows = owner_filter(query, ModelEndpoint, owner).all()
-        return [row for row in rows if row.model_type != "image" and row.supports_tools is not False and local_model_url(row.base_url)]
+        return [row for row in rows if row.model_type != "image" and row.supports_tools is not False
+                and model_destination(row.base_url)]
+
+
+def request_models(request, endpoint):
+    from routes.chat_helpers import _allowed_models_for_request
+    allowed = _allowed_models_for_request(request)
+    return [model for model in chat_models(_endpoint_enabled_models(endpoint))
+            if allowed is None or model in allowed]
 
 
 async def makeup_cards(candidates, gateway, body):
@@ -80,10 +89,12 @@ def setup_schedule_routes(session_manager, chat_processor):
     @router.get("/capabilities")
     async def capabilities(request: Request):
         owner = request_owner(request)
+        auth = getattr(request.app.state, "auth_manager", None)
+        if auth and not auth.get_privileges(owner).get("can_use_agent", False):
+            raise HTTPException(403, "Konto Odysseusa nie ma uprawnień do agenta.")
         return {"protocol": PROTOCOL, "confirmation": "browser-only", "intents": sorted(INTENTS),
-                "endpoints": [{"id": row.id, "name": row.name, "models": [model for model in _endpoint_enabled_models(row)
-                    if not any(word in model.lower() for word in ("embedding", "tts", "whisper", "rerank"))]}
-                    for row in configured_endpoints(owner)]}
+                "endpoints": [{"id": row.id, "name": row.name, **model_destination(row.base_url), "models": models}
+                    for row in configured_endpoints(owner) if (models := request_models(request, row))]}
 
     @router.post("/chat")
     async def chat(request: Request, body: ScheduleChat):
@@ -108,16 +119,20 @@ def setup_schedule_routes(session_manager, chat_processor):
         if selection is not None and (selection.get("faculty") != body.faculty or selection.get("groups") != body.groups):
             raise HTTPException(403, "Wybrany plan lub grupy zmieniły się. Wyślij wiadomość ponownie.")
         endpoints = configured_endpoints(owner)
+        if not body.endpoint_id and (len(endpoints) > 1 or any(
+                model_destination(row.base_url)["execution"] == "cloud" for row in endpoints)):
+            raise HTTPException(422, "Wybierz połączenie z modelem w ustawieniach AI.")
         endpoint = next((row for row in endpoints if row.id == body.endpoint_id), None) if body.endpoint_id else next(iter(endpoints), None)
         if endpoint is None:
-            raise HTTPException(422, "Wybierz skonfigurowany lokalny endpoint w ustawieniach AI.")
-        models = _endpoint_enabled_models(endpoint)
+            raise HTTPException(422, "Wybierz skonfigurowane połączenie z modelem w ustawieniach AI.")
+        models = request_models(request, endpoint)
         model = body.model or os.getenv("SCHEDULE_DEFAULT_MODEL", "")
         if model not in models:
-            raise HTTPException(422, "Wybierz model z listy lokalnego Odysseusa.")
+            raise HTTPException(422, "Wybierz model z listy Odysseusa.")
         base, key = resolve_endpoint_runtime(endpoint, owner=owner)
-        if not local_model_url(base):
-            raise HTTPException(403, "Lokalna integracja nie przełącza się na zewnętrzne API.")
+        destination = model_destination(base)
+        if not destination or normalize_base(base) != normalize_base(endpoint.base_url):
+            raise HTTPException(403, "Adres dostawcy nie odpowiada wybranemu połączeniu.")
         runtime = {"url": build_chat_url(base), "headers": build_headers(key, base), "model": model}
         sid = session_identity(owner, identity["principal"], body.session_id)
         if sid not in _locks and len(_locks) >= 2048:
@@ -157,17 +172,18 @@ def setup_schedule_routes(session_manager, chat_processor):
                         slots = await makeup_cards(result["candidates"], gateway, body)
                         result.update(intent="SLOTS", ui={"type": "slot_choices", "actions": True}, data={"slots": slots})
             except TimeoutError:
-                raise HTTPException(504, "Lokalny model przekroczył czas odpowiedzi. Wyślij krótsze pytanie.")
+                raise HTTPException(504, "Model przekroczył czas odpowiedzi. Wyślij krótsze pytanie.")
             except HTTPException:
                 raise
             except Exception:
-                raise HTTPException(503, "Lokalny agent nie odpowiedział. Sprawdź konfigurację modelu.")
+                raise HTTPException(503, "Agent nie odpowiedział. Sprawdź konfigurację wybranego modelu w Odysseusie.")
             result.pop("candidates", None)
             result.pop("slots", None)
             # Only transcript text is retained. No delegated tokens or provider headers.
             session_manager.add_message(sid, ChatMessage(role="user", content=body.message))
             session_manager.add_message(sid, ChatMessage(role="assistant", content=result["output"],
                 metadata={"model": model, "schedule_integration": True}))
-            return {"ok": True, "native_session_id": sid, **result}
+            return {"ok": True, "native_session_id": sid,
+                    "model_route": {"endpoint_id": endpoint.id, "model": model, **destination}, **result}
 
     return router
