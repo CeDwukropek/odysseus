@@ -167,7 +167,9 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
         if len(calls) > 4:
             raise HTTPException(422, "Model przekroczył limit operacji naraz.")
         native_calls = [{"id": call.get("id") or str(uuid.uuid4()), "type": "function",
-                         "function": {"name": call.get("name"), "arguments": call.get("arguments", "{}")}}
+                         "function": {"name": call.get("name"), "arguments": call.get("arguments", "{}")},
+                         **({"extra_content": call["extra_content"]}
+                            if isinstance(call.get("extra_content"), dict) else {})}
                         for call in calls]
         messages.append({"role": "assistant", "content": reply.get("content") or None, "tool_calls": native_calls})
         for call in native_calls:

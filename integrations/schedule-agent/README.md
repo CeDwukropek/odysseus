@@ -20,6 +20,16 @@ native owner are offered. No fallback to hosted models. The native transport
 The request-scoped tools are never registered in the unrestricted global agent
 or MCP registry. `SKILL.md` is loaded from this reviewed checkout for each turn.
 
+Capabilities mark current endpoints with `provider: local`, `execution: local`
+and a human-readable `destination`. The browser can display cloud-provider
+metadata when that support is activated in a later change; this preparation
+does not permit cloud execution. Both OpenAI and Google destinations still
+fail the runtime's local-only check, including if a catalogue is incorrect.
+
+Opaque `extra_content` on model tool calls is replayed within the current
+request, as required by Gemini thought signatures. It is not included in
+the browser result or the text-only transcript.
+
 The schedule gateway issues a five-minute context for query, makeup, reschedule,
 cancel or restore. Query/makeup expose reads only. Other intents allow a matching
 preview; confirmation remains an authenticated browser action. Makeup candidates

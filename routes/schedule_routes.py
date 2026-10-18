@@ -81,7 +81,8 @@ def setup_schedule_routes(session_manager, chat_processor):
     async def capabilities(request: Request):
         owner = request_owner(request)
         return {"protocol": PROTOCOL, "confirmation": "browser-only", "intents": sorted(INTENTS),
-                "endpoints": [{"id": row.id, "name": row.name, "models": [model for model in _endpoint_enabled_models(row)
+                "endpoints": [{"id": row.id, "name": row.name, "provider": "local", "execution": "local",
+                    "destination": "Twój serwer modeli", "models": [model for model in _endpoint_enabled_models(row)
                     if not any(word in model.lower() for word in ("embedding", "tts", "whisper", "rerank"))]}
                     for row in configured_endpoints(owner)]}
 
