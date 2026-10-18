@@ -46,6 +46,24 @@ Opaque `extra_content` on model tool calls is replayed within the current
 request, as required by Gemini thought signatures. It is not included in
 the browser result or the text-only transcript.
 
+## Filtered plans and structured display
+
+The gateway's `schedule.get_my_schedule` supports `kind` and `exclude_kinds`.
+The bridge enforces unambiguous Polish requests such as "same ćwiczenia" and
+"bez wykładów/labów" even if the model omits or contradicts the relevant argument.
+It does not infer identity, groups or permissions. Complex requests still need
+model interpretation; plural positive kinds are not reduced to one arbitrarily.
+
+Verified date ranges and filters are stored in assistant-message metadata,
+scoped to the gateway selection, without full tool results or credentials.
+Filter-only follow-ups inherit dates from that verified context, while explicit
+new periods are resolved separately. Client-provided history cannot set this
+context. Structured rows are returned as `ui.type=schedule_plan`, `data.plan`;
+the browser renders separate daily cards rather than a dense text paragraph.
+
+Study-note retrieval and writing remain a separate planned feature. This branch
+does not mount Obsidian or add unrestricted filesystem tools to the schedule agent.
+
 The schedule gateway issues a five-minute context for query, makeup, reschedule,
 cancel or restore. Query/makeup expose reads only. Other intents allow a matching
 preview; confirmation remains an authenticated browser action. Makeup candidates

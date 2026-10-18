@@ -6,6 +6,7 @@ tool dispatch. Authority is verified by the configured schedule gateway.
 import asyncio
 import ipaddress
 import json
+import re
 import uuid
 import unicodedata
 from datetime import datetime
@@ -95,6 +96,44 @@ def selected_group(row, groups):
                 and any(value.startswith(label.strip()) for value in values)) for label in labels)
 
 
+def requested_plan_filters(message):
+    """Enforce unambiguous type filters, even when a model omits them.
+
+    More complex requests remain the model's responsibility; never infer groups,
+    subjects, dates or permissions from this parser.
+    """
+    text = "".join(char for char in unicodedata.normalize("NFD", message.lower().replace("ł", "l"))
+                   if not unicodedata.combining(char))
+    text = re.sub(r"\s+", " ", text)
+    kinds = {"cwicz": "exercise", "wyklad": "lecture", "lab": "laboratory",
+             "lekt": "language", "projekt": "project"}
+    word = r"(?:cwicz\w*|wyklad\w*|lab(?:y|ow|ach)?|laboratori\w*|labolatori\w*|lektorat\w*|projekt\w*)"
+    def find_kinds(value):
+        found = []
+        for match in re.finditer(r"\b" + word + r"\b", value):
+            kind = next(kind for prefix, kind in kinds.items() if match[0].startswith(prefix))
+            if kind not in found:
+                found.append(kind)
+        return found
+    filters = {}
+    if re.search(r"\bwszystkie (?:zajecia|rodzaje)\b|\bbez filtrow\b", text):
+        return {"kind": None, "exclude_kinds": []}
+    for match in re.finditer(r"(?<!nie )\b(?:tylko|same|samych|wylacznie)\s+(" + word + r"\b[^,.;!?]*)", text):
+        clause = re.split(r"\bbez\b", match[1])[0]
+        included = find_kinds(clause)
+        if len(included) == 1:
+            filters["kind"] = included[0]
+    excluded = []
+    for match in re.finditer(r"\bbez\s+(" + word + r"\b[^,.;!?]*)", text):
+        clause = re.split(r"\b(?:bez|tylko|same|samych|wylacznie)\b", match[1])[0]
+        for kind in find_kinds(clause):
+            if kind not in excluded:
+                excluded.append(kind)
+    if excluded:
+        filters["exclude_kinds"] = excluded
+    return filters
+
+
 async def native_completion(endpoint, messages, tools, session_id):
     from src.llm_core import stream_llm
     content, calls = [], []
@@ -147,6 +186,9 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
     policy += "\n\n" + skill.read_text(encoding="utf-8").split("---", 2)[-1].strip()
     selection = identity.get("selection") or {"faculty": body.faculty, "groups": body.groups}
     context = {"today": today, "timezone": "Europe/Warsaw", **selection, "intent": body.intent}
+    previous_plan = identity.get("previous_plan")
+    if previous_plan:
+        context["previous_plan"] = previous_plan
     messages = [{"role": "system", "content": policy}, *(preface or []), *history[-16:],
                 {"role": "user", "content": "Aktualny wybór w aplikacji (dane): " + json.dumps(context, ensure_ascii=False)},
                 {"role": "user", "content": body.message}]
@@ -155,6 +197,7 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
                  for tool in identity["tools"]]
     names = {tool["name"].replace(".", "_"): tool["name"] for tool in identity["tools"]}
     proposals, candidates, slots, evidence = [], {}, [], []
+    plan = None
     answer = None
     semantic = {"schedule.find_subjects", "schedule.get_next_occurrence", "schedule.get_my_schedule", "schedule.find_makeup_options"}
     must_read = bool(semantic.intersection(names.values())) and (body.intent == "makeup" or
@@ -164,7 +207,8 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
     def finish(content):
         output = answer if answer and not proposals and body.intent in {"query", "makeup"} else content
         return {"output": output or "Sprawdź przygotowane podglądy.", "proposals": proposals,
-                "candidates": list(candidates.values()), "slots": slots, "evidence": evidence}
+                "candidates": list(candidates.values()), "slots": slots, "evidence": evidence,
+                **({"plan": plan} if plan is not None and not proposals and body.intent == "query" else {})}
 
     for _round in range(6):
         reply = await completion(endpoint, messages, functions, session_id)
@@ -192,6 +236,19 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
                 if not name:
                     raise HTTPException(403, "To narzędzie nie jest dostępne w tej operacji.")
                 args = json.loads(call["function"]["arguments"])
+                if name == "schedule.get_my_schedule" and body.intent == "query":
+                    requested = requested_plan_filters(body.message)
+                    if "kind" in requested:
+                        args.pop("kind", None)
+                        args.pop("exclude_kinds", None)
+                    args.update({key: value for key, value in requested.items() if value is not None})
+                if name == "schedule.get_my_schedule" and previous_plan:
+                    # A filter-only follow-up keeps the verified range. Explicit
+                    # dates/relative periods must be supplied by the model instead.
+                    followup = re.search(r"\b(tylko|same|samych|bez|only|without)\b", body.message.lower())
+                    new_period = re.search(r"\d|\b(jutr|dzis|dziś|pojutr|tygod|tydzie|miesi|week|today|tomorrow|ponied|wtore|środ|srod|czwart|piąte|piate|sobot|niedzie)\w*", body.message.lower())
+                    if followup and not new_period:
+                        args = {**{key: previous_plan[key] for key in ("date_from", "date_to") if key in previous_plan}, **args}
                 if name in {"schedule.get_events", "schedule.find_event"} and args.get("faculty") != body.faculty:
                     raise HTTPException(422, "Wybierz ten plan w aplikacji przed wyszukiwaniem.")
                 result = await gateway.request({"tool": name, "arguments": args})
@@ -200,6 +257,9 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
                                      "event": result.get("event"), "total": result.get("total")})
                     if result.get("message"):
                         answer = result["message"]
+                        plan = None
+                    if name == "schedule.get_my_schedule" and isinstance(result.get("events"), list):
+                        plan = {key: result.get(key) for key in ("events", "date_from", "date_to", "kind", "exclude_kinds", "total", "next_offset")}
                     if name == "schedule.find_makeup_options":
                         slots = result.get("slots", [])
                 if result.get("proposal"):
@@ -214,6 +274,7 @@ async def run_schedule_agent(body, identity, gateway, endpoint, history, session
                 result = {"error": str(error.detail), "status": error.status_code}
                 if name in semantic:
                     evidence.append({"tool": name, "status": "read_failed"})
+                    plan = None
                     answer = "Nie udało się odczytać danych planu. To nie oznacza, że nie masz zajęć. Spróbuj ponownie."
                     if name == "schedule.find_makeup_options":
                         slots = []
