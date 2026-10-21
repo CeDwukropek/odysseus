@@ -317,3 +317,13 @@ def test_pairing_succeeds_even_when_the_first_pull_fails(store, monkeypatch):
     assert result['ok'] is True and result['sync_error'] == missing.message
     status = sync.status('alice')
     assert status['linked'] is True and status['last_error'] == missing.message and status['last_success_at'] is None
+
+
+def test_rows_mirrored_before_flags_existed_are_backfilled(store):
+    apply(store, feed(item('a', added=True)))
+    with store() as db:
+        db.query(cdb.CalendarEvent).update({cdb.CalendarEvent.external_meta: None})
+        db.commit()
+    assert apply(store, feed(item('a', added=True)))['updated'] == 1
+    assert json.loads(mirror_rows(store)['a'].external_meta)['added'] is True
+    assert apply(store, feed(item('a', added=True)))['unchanged'] == 1

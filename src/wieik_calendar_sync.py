@@ -141,7 +141,8 @@ def apply_feed(db, cal, owner, payload) -> dict:
         event_id = str(item["event_id"])
         seen.add(event_id)
         row = existing.get(event_id)
-        if row is not None and row.external_version == item["version"]:
+        # Rows mirrored before external_meta existed are rewritten once to gain their flags.
+        if row is not None and row.external_version == item["version"] and row.external_meta is not None:
             counts["unchanged"] += 1
             continue
         fields = _occurrence_fields(item)
