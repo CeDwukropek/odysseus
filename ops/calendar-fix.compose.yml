@@ -1,0 +1,5 @@
+# Overlay for an existing Odysseus Compose project; build the patched image first.
+services:
+  odysseus:
+    image: odysseus-calendar-fix:local
+    pull_policy: never

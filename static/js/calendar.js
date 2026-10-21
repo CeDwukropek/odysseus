@@ -205,10 +205,14 @@ async function _fetchCalendars() {
 // no-op silently if CalDAV isn't configured.
 async function _syncCaldav(interactive) {
   try {
-    const res = await fetch(`${API_BASE}/api/calendar/sync`, {
+    const res = await fetch(`${API_BASE}/api/calendar/sync?direction=${interactive ? 'both' : 'pull'}`, {
       method: 'POST', credentials: 'same-origin',
     });
-    const data = await res.json().catch(() => ({}));
+    const raw = await res.json().catch(() => ({}));
+    const pulled = raw.pull || raw;
+    const data = { ...pulled, pushed: raw.push?.events || 0,
+      errors: [...(raw.push?.errors || []), ...(pulled.errors || [])] };
+    if (!res.ok) data.errors.push('Sync request failed: HTTP ' + res.status);
     if (interactive) return data;
     // Background path: if the pull actually changed anything, drop
     // local caches and re-render so new events appear.
@@ -225,7 +229,7 @@ async function _syncCaldav(interactive) {
 }
 
 function _optimisticEvent(data, uid) {
-  const cal = _calendars.find(c => c.href === data.calendar_href) || _calendars[0];
+  const cal = _calendars.find(c => c.href === data.calendar_href) || _calendars.find(c => c.is_default) || _calendars[0];
   return {
     uid,
     summary: data.summary || '',
@@ -248,6 +252,12 @@ function _optimisticEvent(data, uid) {
 // resolved the promise and the optimistic state got promoted to truth.
 // All three flows now inspect `r.ok` and roll back the optimistic
 // state + surface a toast on the failure path.
+function _showPendingSync(result) {
+  if (result?.sync?.status === 'pending') {
+    uiModule.showToast(result.sync.message || 'Saved locally; remote sync is pending.');
+  }
+}
+
 async function _createEvent(data) {
   const tempUid = 'temp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   _allEvents[tempUid] = _optimisticEvent(data, tempUid);
@@ -258,6 +268,7 @@ async function _createEvent(data) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(d => {
+    _showPendingSync(d);
     if (d.uid) {
       delete _allEvents[tempUid];
       _allEvents[d.uid] = _optimisticEvent(data, d.uid);
@@ -284,8 +295,9 @@ async function _updateEvent(uid, data) {
   fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(uid)}`, {
     method: 'PUT', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
-  }).then(r => {
+  }).then(async r => {
     if (!r.ok) throw new Error('HTTP ' + r.status);
+    _showPendingSync(await r.json());
     if (isRecurring) {
       _fetchedRanges = [];
       localStorage.removeItem(LS_KEY);
@@ -334,12 +346,13 @@ async function _deleteEvent(uid, { scope = 'series' } = {}) {
   const scopeParam = deleteOccurrenceOnly ? '?scope=occurrence' : '';
   fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(uid)}${scopeParam}`, {
     method: 'DELETE', credentials: 'same-origin',
-  }).then(r => {
+  }).then(async r => {
     // 404 = the event was already deleted by another session/device. That's
     // exactly the state we want, so treat it as success — don't restore the
     // row, otherwise the user can never clear stale cached events that were
     // deleted from desktop while mobile was open (and vice versa).
     if (!r.ok && r.status !== 404) throw new Error('HTTP ' + r.status);
+    if (r.ok) _showPendingSync(await r.json());
     if (isRecurring) {
       _fetchedRanges = [];
       localStorage.removeItem(LS_KEY);
@@ -920,7 +933,7 @@ function _headerHTML() {
         ).join('')}
       </div>
       <button class="cal-nav" id="cal-settings" title="Calendar settings" style="position:relative;top:-3px;"><svg width="13" height="13" style="position:relative;top:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.68 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-      <button class="cal-nav${window._calSyncing ? ' cal-syncing' : ''}${window._calSyncDone ? ' cal-sync-done' : ''}" id="cal-sync" title="Refresh from database" style="position:relative;top:-3px;">${window._calSyncDone ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>'}</button>
+      <button class="cal-nav${window._calSyncing ? ' cal-syncing' : ''}${window._calSyncDone ? ' cal-sync-done' : ''}" id="cal-sync" title="Synchronize calendars" style="position:relative;top:-3px;">${window._calSyncDone ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>'}</button>
       ${_filtersToggleHTML()}
       <button class="cal-add-btn cal-add-btn-text" id="cal-add" title="New event"><span class="cal-add-plus">+</span><span class="cal-add-label">New</span></button>
     </div>
@@ -2214,7 +2227,16 @@ function _wireAll(body) {
       ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
       : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
     const minSpin = new Promise(r => setTimeout(r, 700));
+    let syncFailed = false;
     try {
+      if (_calendars.some(c => c.source === 'caldav')) {
+        const result = await _syncCaldav(true);
+        if (result?.errors?.length) {
+          syncFailed = true;
+          uiModule.showError('Calendar sync: ' + result.errors[0]);
+        }
+        await _fetchCalendars();
+      }
       await Promise.all([
         _fetchEvents(_range[0], _range[1], /*force*/ true).catch(() => {}),
         minSpin,
@@ -2225,13 +2247,13 @@ function _wireAll(body) {
       // template reads (not a one-off innerHTML on the button), so a stray
       // _render() — the calendar re-renders mid-flow — can't wipe it. Same
       // reason the spin is flag-driven.
-      window._calSyncDone = true;
+      window._calSyncDone = !syncFailed;
       _render();
       setTimeout(() => {
         window._calSyncDone = false;
         if (_open) _render();
       }, 900);
-      if (uiModule?.showToast) uiModule.showToast('Calendar refreshed');
+      if (!syncFailed && uiModule?.showToast) uiModule.showToast('Calendar synchronized');
     }
   });
   // Brief spin on the "+" glyph before the new-event form opens. The
@@ -2525,6 +2547,14 @@ async function _showCalSettings() {
       </div>
       <div class="modal-body" style="padding:16px;display:flex;flex-direction:column;gap:16px;">
         <div>
+          <label for="cal-settings-default">Default calendar for new events</label>
+          <select id="cal-settings-default" class="cal-input">
+            <option value="">Automatic (first available calendar)</option>
+            ${cals.map(c => `<option value="${_e(c.href)}" ${c.is_default ? 'selected' : ''}>${_e(c.name)}</option>`).join('')}
+          </select>
+          <div style="font-size:11px;opacity:0.6;">Used by the agent and event form when no calendar is specified.</div>
+        </div>
+        <div>
           <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Your calendars</div>
           <div id="cal-settings-list" style="display:flex;flex-direction:column;gap:4px;">
             ${cals.map(c => `
@@ -2728,6 +2758,22 @@ async function _showCalSettings() {
 
   // Sync now — fires the CalDAV pull synchronously so we can show the
   // result inline, then refreshes the panel + calendar grid.
+  overlay.querySelector('#cal-settings-default')?.addEventListener('change', async (event) => {
+    const select = event.currentTarget;
+    select.disabled = true;
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/default-calendar`, {
+        method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calendar_href: select.value || null })
+      });
+      if (!res.ok) throw new Error('Could not save default calendar');
+      await _fetchCalendars();
+      uiModule.showToast('Default calendar saved');
+    } catch (error) { uiModule.showError(error.message); }
+    finally { select.disabled = false; }
+  });
+
   overlay.querySelector('#cal-settings-sync-now')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const status = overlay.querySelector('#cal-settings-sync-status');
@@ -2739,6 +2785,7 @@ async function _showCalSettings() {
     } else {
       const parts = [];
       if (data.events) parts.push(`${data.events} events`);
+      if (data.pushed) parts.push(`${data.pushed} uploaded`);
       if (data.deleted) parts.push(`${data.deleted} removed`);
       status.textContent = parts.length ? `Synced — ${parts.join(', ')}` : 'Synced — no changes';
       _allEvents = {}; _fetchedRanges = [];
@@ -2806,8 +2853,8 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
   // Default to all-day when dragging across multiple days
   const ad = existing ? existing.all_day : (defaultEndDate && defaultEndDate !== defaultDate);
 
-  let calOpts = _calendars.filter(c => !_hiddenCals.has(c.href)).map(c =>
-    `<option value="${_e(c.href)}" ${existing && existing.calendar_href === c.href ? 'selected' : ''}>${_e(c.name)}</option>`
+  let calOpts = _calendars.filter(c => !_hiddenCals.has(c.href) || c.is_default || existing?.calendar_href === c.href).map(c =>
+    `<option value="${_e(c.href)}" ${(existing ? existing.calendar_href === c.href : c.is_default) ? 'selected' : ''}>${_e(c.name)}</option>`
   ).join('');
 
   // "Bespoke" event form: a big clock-face hero (time + date) and a single
@@ -3181,7 +3228,7 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
       description: document.getElementById('cal-f-desc').value,
       location: document.getElementById('cal-f-loc').value,
       rrule: document.getElementById('cal-f-rrule').value || '',
-      calendar_href: document.getElementById('cal-f-cal')?.value || (_calendars[0]?.href || ''),
+      calendar_href: document.getElementById('cal-f-cal')?.value || (_calendars.find(c => c.is_default)?.href || _calendars[0]?.href || ''),
       color: colorVal || undefined,
     };
     try {
