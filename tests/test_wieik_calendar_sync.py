@@ -110,14 +110,6 @@ def test_resync_updates_synced_fields_keeps_local_ones_and_prunes_only_inside_wi
     assert 'gone' not in rows and 'old' in rows
 
 
-def test_guard_allows_only_local_fields_on_managed_calendars():
-    managed, local = SimpleNamespace(source=sync.MANAGED_SOURCE), SimpleNamespace(source='local')
-    assert sync.guard_mirror_write(managed, {'color'}) is None
-    assert sync.guard_mirror_write(managed, {'color', 'dtstart'}) == sync.AGENT_MESSAGE
-    assert sync.guard_mirror_write(managed, None) == sync.AGENT_MESSAGE
-    assert sync.guard_mirror_write(local, {'dtstart'}) is None
-
-
 def test_ui_edits_are_written_to_wieikschedule_and_unsupported_fields_refused(store, monkeypatch):
     apply(store, feed(item('a', version='0123456789abcdef')))
     uid = sync.mirror_uid('alice', 'a')
@@ -205,17 +197,56 @@ def test_implicit_default_calendar_is_never_the_mirror(store):
         assert cal.id != MIRROR and cal.source != sync.MANAGED_SOURCE
 
 
-def test_agent_tool_cannot_change_plan_fields_of_the_mirror(store):
-    apply(store, feed(item('a')))
+def test_agent_only_prepares_previews_and_never_confirms(store, monkeypatch):
+    apply(store, feed(item('a', version='0123456789abcdef')))
     uid = sync.mirror_uid('alice', 'a')
+    calls = []
+    preview = {'id': 'p-1', 'expires_at': 'soon', 'before': {'date': '2026-10-19', 'start_time': '07:30:00', 'room': '12'},
+               'after': {'date': '2026-10-20', 'start_time': '07:30:00', 'room': '12'}}
+    monkeypatch.setattr(sync, '_call', fake_call([
+        (SimpleNamespace(headers={}), {'ok': True, 'status': 'proposed', 'proposal': preview}),
+        (SimpleNamespace(headers={}), {'ok': True, 'status': 'proposed', 'proposal': {**preview, 'id': 'p-2', 'after': None}}),
+    ], calls))
     call = lambda args: asyncio.run(do_manage_calendar(json.dumps(args), owner='alice'))
     created = call({'action': 'create_event', 'summary': 'X', 'dtstart': '2026-10-19T10:00:00', 'calendar': 'Plan zajęć'})
     assert created['exit_code'] == 1 and 'wieikschedule' in created['error']
-    assert call({'action': 'update_event', 'uid': uid, 'dtstart': '2026-10-20T07:30:00'})['exit_code'] == 1
-    assert call({'action': 'delete_event', 'uid': uid})['exit_code'] == 1
+    moved = call({'action': 'update_event', 'uid': uid, 'dtstart': '2026-10-20T07:30:00', 'dtend': '2026-10-20T09:00:00'})
+    assert moved['exit_code'] == 0 and moved['requires_confirmation'] is True and 'NIE została' in moved['response']
+    assert calls[0][3]['mode'] == 'propose' and calls[0][3]['values'] == {'date': '2026-10-20'}
+    removed = call({'action': 'delete_event', 'uid': uid})
+    assert removed['proposal']['summary'] == 'odwołanie zajęć'
+    assert calls[1][3]['operation'] == 'remove' and calls[1][3]['mode'] == 'propose'
+    assert all(path != '/api/calendar-sync/confirm' for _, path, *_ in calls)
     assert call({'action': 'update_event', 'uid': uid, 'importance': 'high'})['exit_code'] == 0
+    assert call({'action': 'update_event', 'uid': uid, 'summary': 'Nowy tytuł'})['exit_code'] == 1
+    assert len(calls) == 2
     row = mirror_rows(store)['a']
-    assert row.dtstart == datetime(2026, 10, 19, 7, 30) and row.importance == 'high'
+    assert row.dtstart == datetime(2026, 10, 19, 7, 30) and row.status == 'confirmed' and row.importance == 'high'
+
+
+def test_previews_are_listed_confirmed_and_rejected_only_from_the_calendar_ui(store, monkeypatch):
+    apply(store, feed(item('a')))
+    calls = []
+    listed = {'ok': True, 'proposals': [{'id': '11111111-1111-1111-1111-111111111111', 'subject': 'MUD', 'type': 'Lab',
+              'before': {'date': '2026-10-19', 'start_time': '07:30:00', 'room': '12'},
+              'after': {'date': '2026-10-19', 'start_time': '07:30:00', 'room': 'C3'}, 'reason': None, 'expires_at': 'soon'}]}
+    monkeypatch.setattr(sync, '_call', fake_call([
+        (SimpleNamespace(headers={}), listed),
+        (SimpleNamespace(headers={}), {'ok': True, 'status': 'applied', 'result': {}}),
+        (SimpleNamespace(headers={'etag': '"n"'}), feed(item('a', room='C3', modified=True))),
+        (SimpleNamespace(headers={}), {'ok': True, 'rejected': True}),
+    ], calls))
+    pid = '11111111-1111-1111-1111-111111111111'
+    result = asyncio.run(route('GET', '/wieik/proposals')(request('alice')))
+    assert result['proposals'][0]['summary'] == '2026-10-19 07:30, sala 12 → 2026-10-19 07:30, sala C3'
+    asyncio.run(route('POST', '/wieik/proposals/{proposal_id}/confirm')(request('alice'), pid))
+    assert calls[1][1:4] == ('/api/calendar-sync/confirm', 'wkc_token', {'proposal_id': pid})
+    assert mirror_rows(store)['a'].location == 'C3'
+    asyncio.run(route('POST', '/wieik/proposals/{proposal_id}/reject')(request('alice'), pid))
+    assert calls[3][1] == '/api/calendar-sync/reject'
+    with pytest.raises(HTTPException) as ex:
+        asyncio.run(route('POST', '/wieik/proposals/{proposal_id}/confirm')(request('alice'), 'not-a-uuid'))
+    assert ex.value.status_code == 422
 
 
 def test_tidy_calendar_is_owner_scoped_and_skips_the_mirror(store):

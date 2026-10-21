@@ -5,8 +5,9 @@ effective plan of one linked user into a calendar with source "wieikschedule".
 Synced fields are owned by the feed; color, importance, event type and pings
 remain local. A user's own edit of time, length or room is written through to
 wieikschedule as a private change (``edit_from_ui``), checked against the
-occurrence version last pulled. Other writers must not change synced fields
-(see ``guard_mirror_write``).
+occurrence version last pulled. The agent only prepares previews
+(``propose_from_agent``) that the user confirms in the calendar UI. Other
+writers must not change synced fields.
 """
 import asyncio
 import json
@@ -31,10 +32,6 @@ READ_ONLY_MESSAGE = (
     "Kalendarz „Plan zajęć” pochodzi z wieikschedule: nie można w nim tworzyć wydarzeń "
     "ani ustawić go jako domyślnego. Zajęcia przesuniesz lub odwołasz, edytując je w kalendarzu."
 )
-AGENT_MESSAGE = (
-    "Agent nie zmienia planu zajęć bezpośrednio. Przesuń lub odwołaj zajęcia w kalendarzu "
-    "albo w wieikschedule; agent może zmienić tylko ważność i typ wydarzenia."
-)
 PLAN_FIELDS_MESSAGE = (
     "W planie zajęć zmienisz termin, czas trwania i salę. Tytuł, opis i powtarzanie "
     "pochodzą z wieikschedule; kolor, ważność i typ wydarzenia zmieniasz tutaj."
@@ -53,15 +50,6 @@ class SyncError(Exception):
 
 def is_managed(cal) -> bool:
     return bool(cal) and cal.source == MANAGED_SOURCE
-
-
-def guard_mirror_write(cal, fields=()):
-    """Return an error message when a write would change synced mirror fields."""
-    if not is_managed(cal):
-        return None
-    if fields is None or set(fields) - LOCAL_FIELDS:
-        return AGENT_MESSAGE
-    return None
 
 
 def mirror_uid(owner, event_id) -> str:
@@ -443,3 +431,61 @@ def local_wall_clock(value, is_utc):
     if not is_utc:
         return value
     return value.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Europe/Warsaw")).replace(tzinfo=None)
+
+
+def _proposal_summary(proposal) -> str:
+    before, after = proposal.get("before"), proposal.get("after")
+    if not after:
+        return "odwołanie zajęć"
+    def slot(row):
+        start = str(row.get("start_time") or "")[:5]
+        return f"{row.get('date')} {start}, sala {row.get('room') or '—'}"
+    return f"{slot(before)} → {slot(after)}" if before else f"przywrócenie: {slot(after)}"
+
+
+async def propose_from_agent(owner, uid, changes=None, remove=False) -> dict:
+    """The agent may only prepare a preview; local-only fields are saved directly.
+
+    Nothing here confirms a plan change: confirmation exists only behind the
+    signed-in calendar UI routes (``confirm_proposal``).
+    """
+    row = _mirror_row(owner, uid)
+    if remove:
+        data = await _write(owner, row, "remove", mode="propose")
+        local = {}
+    else:
+        values, local = plan_edit(row, changes or {})
+        data = await _write(owner, row, "modify", values, mode="propose") if values else None
+    _save_local(owner, uid, local)
+    proposal = (data or {}).get("proposal")
+    if not proposal:
+        return {"proposal": None, "local": sorted(local)}
+    return {"proposal": {"id": proposal["id"], "expires_at": proposal.get("expires_at"),
+                         "summary": _proposal_summary(proposal)}, "local": sorted(local)}
+
+
+def _token(owner):
+    with SessionLocal() as db:
+        link = _link(db, owner)
+        if link is None:
+            raise SyncError(404, "NOT_LINKED", "Plan zajęć z wieikschedule nie jest połączony.")
+        return decrypt(link.token)
+
+
+async def list_proposals(owner) -> list:
+    _, data = await _call("GET", "/api/calendar-sync/proposals", token=_token(owner))
+    return [{"id": item["id"], "subject": item.get("subject"), "type": item.get("type"),
+             "summary": _proposal_summary(item), "reason": item.get("reason"), "expires_at": item.get("expires_at")}
+            for item in data.get("proposals", [])]
+
+
+async def confirm_proposal(owner, proposal_id) -> dict:
+    """Called only from the signed-in calendar UI after the user clicks confirm."""
+    _, data = await _call("POST", "/api/calendar-sync/confirm", token=_token(owner), body={"proposal_id": proposal_id})
+    await _refresh_quietly(owner)
+    return {"ok": True, "result": data.get("result")}
+
+
+async def reject_proposal(owner, proposal_id) -> dict:
+    await _call("POST", "/api/calendar-sync/reject", token=_token(owner), body={"proposal_id": proposal_id})
+    return {"ok": True}

@@ -273,9 +273,24 @@ async function _restoreWieik(uid) {
 let _wieikTimer = null;
 function _startWieikPolling() {
   const linked = () => _calendars.some(c => c.source === 'wieikschedule');
-  if (linked()) _syncWieik(false);
+  if (linked()) { _syncWieik(false); _checkWieikProposals(); }
   clearInterval(_wieikTimer);
-  _wieikTimer = setInterval(() => { if (_open && !document.hidden && linked()) _syncWieik(false); }, 180000);
+  _wieikTimer = setInterval(() => {
+    if (_open && !document.hidden && linked()) { _syncWieik(false); _checkWieikProposals(); }
+  }, 180000);
+}
+
+// Tell the user once about each new agent preview waiting for confirmation.
+const _seenWieikProposals = new Set();
+async function _checkWieikProposals() {
+  try {
+    const res = await fetch(`${API_BASE}/api/calendar/wieik/proposals`, { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const { proposals = [] } = await res.json();
+    const fresh = proposals.filter(p => !_seenWieikProposals.has(p.id));
+    fresh.forEach(p => _seenWieikProposals.add(p.id));
+    if (fresh.length) uiModule.showToast(`Agent proponuje ${fresh.length === 1 ? 'zmianę' : fresh.length + ' zmiany'} w planie zajęć — zatwierdź w ustawieniach kalendarza.`);
+  } catch (_) {}
 }
 function _stopWieikPolling() { clearInterval(_wieikTimer); _wieikTimer = null; }
 
@@ -2651,6 +2666,7 @@ async function _renderWieikSection(overlay, cleanup) {
     <div style="font-size:11px;opacity:0.6;margin-top:2px;">Ostatnia synchronizacja: ${_e(when(st.last_success_at))}</div>
     ${st.last_error ? `<div style="font-size:11px;color:var(--red);margin-top:2px;">${_e(st.last_error)}</div>` : ''}
     ${st.stale && !st.last_error ? `<div style="font-size:11px;opacity:0.7;margin-top:2px;">Plan może być nieaktualny.</div>` : ''}
+    <div id="cal-wieik-proposals" style="margin-top:6px;"></div>
     <div id="cal-wieik-cancelled" style="margin-top:6px;"></div>
     <div id="cal-wieik-actions" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px;">
       <button id="cal-wieik-sync" type="button" style="${btn}">Odśwież teraz</button>
@@ -2658,6 +2674,32 @@ async function _renderWieikSection(overlay, cleanup) {
       <span id="cal-wieik-status" style="font-size:11px;opacity:0.7;"></span>
     </div>`;
   const status = box.querySelector('#cal-wieik-status');
+  fetch(`${API_BASE}/api/calendar/wieik/proposals`, { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : { proposals: [] })
+    .then(({ proposals = [] }) => {
+      const list = box.querySelector('#cal-wieik-proposals');
+      if (!list || !proposals.length) return;
+      list.innerHTML = `<div style="font-size:11px;opacity:0.8;font-weight:600;">Do zatwierdzenia (propozycje agenta):</div>` + proposals.map(p => `
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11px;margin-top:3px;">
+          <span>${_e(p.subject || '')}: ${_e(p.summary)}${p.reason ? ` — ${_e(p.reason)}` : ''}</span>
+          <button type="button" class="cal-wieik-confirm" data-id="${_e(p.id)}" style="${btn}font-size:11px;padding:1px 6px;">Zatwierdź</button>
+          <button type="button" class="cal-wieik-reject" data-id="${_e(p.id)}" style="${btn}font-size:11px;padding:1px 6px;">Odrzuć</button>
+        </div>`).join('');
+      const act = (selector, path) => list.querySelectorAll(selector).forEach(b => b.addEventListener('click', async () => {
+        list.querySelectorAll('button').forEach(x => { x.disabled = true; });
+        try {
+          const res = await fetch(`${API_BASE}/api/calendar/wieik/proposals/${encodeURIComponent(b.dataset.id)}/${path}`, { method: 'POST', credentials: 'same-origin' });
+          if (!res.ok) throw await _responseError(res);
+          if (path === 'confirm') { _reloadAfterPlanChange(); uiModule.showToast('Zmiana zatwierdzona w planie zajęć'); }
+          await reopen();
+        } catch (err) {
+          status.textContent = err.message;
+          list.querySelectorAll('button').forEach(x => { x.disabled = false; });
+        }
+      }));
+      act('.cal-wieik-confirm', 'confirm');
+      act('.cal-wieik-reject', 'reject');
+    }).catch(() => {});
   fetch(`${API_BASE}/api/calendar/wieik/cancelled`, { credentials: 'same-origin' })
     .then(r => r.ok ? r.json() : { events: [] })
     .then(({ events = [] }) => {

@@ -30,8 +30,33 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
         _record_caldav_delete_tombstone,
     )
     from src.calendar_defaults import default_calendar_id, resolve_calendar
-    from src.wieik_calendar_sync import AGENT_MESSAGE, READ_ONLY_MESSAGE, guard_mirror_write, is_managed
+    from src.wieik_calendar_sync import READ_ONLY_MESSAGE, SyncError, is_managed, local_wall_clock, propose_from_agent
     import uuid as _uuid
+
+    async def _propose(owner_id, event_uid, changes=None, remove=False):
+        try:
+            return await propose_from_agent(owner_id, event_uid, changes, remove=remove)
+        except SyncError as e:
+            return {"error": e.message}
+
+    def _plan_proposal_result(result):
+        if result.get("error"):
+            return {"error": result["error"], "exit_code": 1}
+        proposal = result.get("proposal")
+        if not proposal:
+            saved = ", ".join(result.get("local") or []) or "nic"
+            return {"response": f"Zapisano lokalnie: {saved}. Plan zajęć się nie zmienił.", "exit_code": 0}
+        return {
+            "response": (
+                f"Przygotowałem propozycję zmiany w planie zajęć: {proposal['summary']}. "
+                "NIE została jeszcze zapisana. Użytkownik musi ją zatwierdzić w kalendarzu Odysseusa "
+                "(ustawienia kalendarza → Plan zajęć wieikschedule) albo w wieikschedule (Mój plan). "
+                "Propozycja wygasa po 10 minutach."
+            ),
+            "proposal": proposal,
+            "requires_confirmation": True,
+            "exit_code": 0,
+        }
 
     try:
         args = _parse_tool_args(content)
@@ -474,11 +499,22 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             ev = _event_query().filter(CalendarEvent.uid == base_uid).first()
             if not ev:
                 return {"error": f"Event {uid} not found", "exit_code": 1}
-            synced = {key for key in ("summary", "description", "location", "dtstart", "dtend", "all_day", "rrule", "repeat")
-                      if args.get(key) is not None}
-            blocked = guard_mirror_write(ev.calendar, synced)
-            if blocked:
-                return {"error": blocked, "exit_code": 1}
+            if is_managed(ev.calendar):
+                # The plan lives in wieikschedule: the agent only prepares a preview the user confirms.
+                changes = {key: args.get(key) for key in ("summary", "description", "location", "all_day", "rrule")}
+                try:
+                    for key in ("dtstart", "dtend"):
+                        if args.get(key) is not None:
+                            changes[key] = local_wall_clock(*_parse_event_dt(args[key]))
+                except ValueError as e:
+                    return {"error": str(e), "exit_code": 1}
+                _tag = (args.get("event_type") or args.get("tag") or args.get("category") or args.get("type"))
+                if _tag is not None:
+                    changes["event_type"] = _tag
+                if args.get("importance") is not None:
+                    changes["importance"] = args["importance"]
+                db.rollback()
+                return _plan_proposal_result(await _propose(owner, base_uid, changes))
             missing_id = reserve_upload_references(
                 get_upload_handler(),
                 owner,
@@ -543,7 +579,8 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             if not ev:
                 return {"error": f"Event {uid} not found", "exit_code": 1}
             if is_managed(ev.calendar):
-                return {"error": AGENT_MESSAGE, "exit_code": 1}
+                db.rollback()
+                return _plan_proposal_result(await _propose(owner, base_uid, remove=True))
             is_caldav = ev.calendar and ev.calendar.source == "caldav" and ev.remote_href
             if is_caldav:
                 _record_caldav_delete_tombstone(db, ev, owner)

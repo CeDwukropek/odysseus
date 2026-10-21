@@ -1128,6 +1128,27 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             raise HTTPException(422, "Podaj tylko uid zajęć.")
         return await _wieik_call(wieik_sync.restore_from_ui, owner, body["uid"])
 
+    def _proposal_id(value):
+        if not re.fullmatch(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value or ""):
+            raise HTTPException(422, "Nieprawidłowy identyfikator propozycji.")
+        return value
+
+    # Agent previews are confirmed only here, by the signed-in user; API tokens cannot reach these routes.
+    @router.get("/wieik/proposals")
+    async def wieik_proposals(request: Request):
+        owner = _require_user(request)
+        return {"proposals": await _wieik_call(wieik_sync.list_proposals, owner)}
+
+    @router.post("/wieik/proposals/{proposal_id}/confirm")
+    async def wieik_confirm_proposal(request: Request, proposal_id: str):
+        owner = _require_user(request)
+        return await _wieik_call(wieik_sync.confirm_proposal, owner, _proposal_id(proposal_id))
+
+    @router.post("/wieik/proposals/{proposal_id}/reject")
+    async def wieik_reject_proposal(request: Request, proposal_id: str):
+        owner = _require_user(request)
+        return await _wieik_call(wieik_sync.reject_proposal, owner, _proposal_id(proposal_id))
+
     @router.get("/wieik/cancelled")
     async def wieik_cancelled(request: Request):
         owner = _require_user(request)
