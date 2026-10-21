@@ -1883,8 +1883,30 @@ class CalendarEvent(TimestampMixin, Base):
     remote_href = Column(String, nullable=True)        # CalDAV object URL for updates/deletes
     remote_etag = Column(String, nullable=True)        # Last seen CalDAV ETag, when available
     caldav_sync_pending = Column(String, nullable=True) # create | update | delete retry marker
+    # Managed mirrors (e.g. "wieikschedule"): the source system's occurrence id and
+    # a fingerprint of the last applied version. Local-only fields stay untouched.
+    external_source  = Column(String, nullable=True, index=True)
+    external_id      = Column(String, nullable=True)
+    external_version = Column(String, nullable=True)
 
     calendar = relationship("CalendarCal", back_populates="events")
+
+
+class WieikCalendarLink(TimestampMixin, Base):
+    """One owner's link to a wieikschedule plan mirrored into a managed calendar."""
+    __tablename__ = "wieik_calendar_links"
+
+    owner           = Column(String, primary_key=True)
+    calendar_id     = Column(String, ForeignKey("calendars.id", ondelete="CASCADE"), nullable=False, unique=True)
+    link_id         = Column(String, nullable=False)
+    token           = Column(Text, nullable=False)     # secret_storage-encrypted link token
+    label           = Column(String, nullable=False, default="")
+    faculty         = Column(String, nullable=False, default="")
+    group_set_name  = Column(String, nullable=True)
+    etag            = Column(String, nullable=True)
+    last_attempt_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_error      = Column(Text, nullable=True)
 
 
 class CalendarDeletedEvent(TimestampMixin, Base):
@@ -2142,6 +2164,7 @@ def init_db():
     _migrate_add_calendar_account_id()
     _migrate_add_caldav_sync_columns()
     _migrate_add_calendar_recurrence_exdates()
+    _migrate_add_calendar_external_identity()
     _migrate_chat_messages_fts()
     _migrate_encrypt_email_passwords()
     _migrate_encrypt_signatures()
@@ -2559,6 +2582,35 @@ def _migrate_add_calendar_recurrence_exdates():
         conn.commit()
     except Exception as e:
         logging.getLogger(__name__).warning(f"calendar_events recurrence_exdates migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+def _migrate_add_calendar_external_identity():
+    """Add the source identity of managed mirror events (wieikschedule plan)."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(calendar_events)").fetchall()]
+        if not columns:
+            return
+        for name in ("external_source", "external_id", "external_version"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE calendar_events ADD COLUMN {name} TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_calendar_events_external_source ON calendar_events(external_source)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_calendar_events_external "
+            "ON calendar_events(calendar_id, external_id) WHERE external_id IS NOT NULL"
+        )
+        conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"calendar_events external identity migration failed: {e}")
     finally:
         try:
             conn.close()

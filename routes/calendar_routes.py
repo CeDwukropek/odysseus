@@ -18,6 +18,9 @@ from src.auth_helpers import effective_user, require_user
 from src.calendar_defaults import default_calendar_id, resolve_calendar
 from src.upload_limits import read_upload_limited, ICS_MAX_BYTES
 from src.upload_handler import reserve_upload_references
+import src.wieik_calendar_sync as wieik_sync
+from src.wieik_calendar_sync import (MANAGED_SOURCE, READ_ONLY_MESSAGE, SyncError, guard_mirror_write,
+                                     is_managed)
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +270,9 @@ def _ensure_default_calendar(db, owner: str = None) -> CalendarCal:
     remains usable and atomic.
     """
     owner = owner or FALLBACK_OWNER
-    cal = db.query(CalendarCal).filter(CalendarCal.owner == owner).first()
+    # The plan mirror is read-only, so it can never be the implicit write target.
+    writable = or_(CalendarCal.source.is_(None), CalendarCal.source != MANAGED_SOURCE)
+    cal = db.query(CalendarCal).filter(CalendarCal.owner == owner, writable).first()
     if cal:
         return cal
 
@@ -275,7 +280,7 @@ def _ensure_default_calendar(db, owner: str = None) -> CalendarCal:
     if dialect == "sqlite":
         _begin_sqlite_default_write(db)
         # Another worker may have committed while BEGIN IMMEDIATE waited.
-        cal = db.query(CalendarCal).filter(CalendarCal.owner == owner).first()
+        cal = db.query(CalendarCal).filter(CalendarCal.owner == owner, writable).first()
         if cal:
             return cal
 
@@ -1084,6 +1089,38 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         from src.caldav_sync import sync_caldav_direction
         return await sync_caldav_direction(owner, direction)
 
+    # ── wieikschedule plan mirror ─────────────────────────────────────────────
+
+    async def _wieik_call(action, *args):
+        try:
+            return await action(*args)
+        except SyncError as e:
+            # Upstream auth failures concern the link, not this Odysseus session.
+            raise HTTPException(409 if e.status in (401, 403) else e.status, e.message)
+
+    @router.get("/wieik")
+    async def wieik_status(request: Request):
+        return wieik_sync.status(_require_user(request))
+
+    @router.post("/wieik/pair")
+    async def wieik_pair(request: Request):
+        owner = _require_user(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict) or set(body) != {"code"}:
+            raise HTTPException(422, "Podaj tylko kod połączenia.")
+        return await _wieik_call(wieik_sync.pair, owner, body["code"])
+
+    @router.post("/wieik/sync")
+    async def wieik_sync_now(request: Request):
+        return await _wieik_call(wieik_sync.sync_owner, _require_user(request))
+
+    @router.delete("/wieik")
+    async def wieik_disconnect(request: Request):
+        return await _wieik_call(wieik_sync.disconnect, _require_user(request))
+
 
     @router.delete("/calendars/{cal_id}")
     async def delete_calendar(request: Request, cal_id: str):
@@ -1091,6 +1128,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         db = SessionLocal()
         try:
             cal = _get_or_404_calendar(db, cal_id, owner)
+            if is_managed(cal):
+                # Removing the plan mirror is a disconnect: it also revokes the link token.
+                return await _wieik_call(wieik_sync.disconnect, owner)
             db.query(CalendarEvent).filter(CalendarEvent.calendar_id == cal_id).delete()
             db.delete(cal)
             db.commit()
@@ -1116,7 +1156,8 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             raise HTTPException(422, "Choose a calendar or null to reset the default.")
         if reference is not None:
             with SessionLocal() as db:
-                resolve_calendar(db, owner, reference)
+                if is_managed(resolve_calendar(db, owner, reference)):
+                    raise HTTPException(409, READ_ONLY_MESSAGE)
         from routes.prefs_routes import _load_for_user, _save_for_user
         prefs = _load_for_user(owner) or {}
         prefs["default_calendar_href"] = reference
@@ -1221,6 +1262,8 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         db = SessionLocal()
         try:
             cal = resolve_calendar(db, owner, data.calendar_href)
+            if is_managed(cal):
+                raise HTTPException(409, READ_ONLY_MESSAGE)
 
             uid = str(uuid.uuid4())
             # Use the tz-detecting parser so events posted with an offset
@@ -1277,6 +1320,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         db = SessionLocal()
         try:
             ev = _get_or_404_event(db, base_uid, owner)
+            blocked = guard_mirror_write(ev.calendar, {k for k, v in data.model_dump().items() if v is not None})
+            if blocked:
+                raise HTTPException(409, blocked)
             if data.summary is not None:
                 ev.summary = data.summary
             if data.description is not None:
@@ -1329,6 +1375,8 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         db = SessionLocal()
         try:
             ev = _get_or_404_event(db, base_uid, owner)
+            if is_managed(ev.calendar):
+                raise HTTPException(409, READ_ONLY_MESSAGE)
             is_occurrence_delete = scope in {"occurrence", "instance"} and "::" in uid and bool(ev.rrule)
             is_caldav = ev.calendar and ev.calendar.source == "caldav"
             if is_occurrence_delete:
@@ -1434,6 +1482,7 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             target_cal = db.query(CalendarCal).filter(
                 CalendarCal.name == cal_display,
                 CalendarCal.owner == owner,
+                or_(CalendarCal.source.is_(None), CalendarCal.source != MANAGED_SOURCE),
             ).first()
             if not target_cal:
                 target_cal = CalendarCal(

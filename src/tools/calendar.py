@@ -30,6 +30,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
         _record_caldav_delete_tombstone,
     )
     from src.calendar_defaults import default_calendar_id, resolve_calendar
+    from src.wieik_calendar_sync import READ_ONLY_MESSAGE, guard_mirror_write, is_managed
     import uuid as _uuid
 
     try:
@@ -311,6 +312,8 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
 
             cal_href = args.get("calendar_href") or args.get("calendar")
             cal = resolve_calendar(db, owner, cal_href, allow_names=True)
+            if is_managed(cal):
+                return {"error": READ_ONLY_MESSAGE, "exit_code": 1}
 
             all_day = bool(args.get("all_day", False))
             try:
@@ -471,6 +474,11 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             ev = _event_query().filter(CalendarEvent.uid == base_uid).first()
             if not ev:
                 return {"error": f"Event {uid} not found", "exit_code": 1}
+            synced = {key for key in ("summary", "description", "location", "dtstart", "dtend", "all_day", "rrule", "repeat")
+                      if args.get(key) is not None}
+            blocked = guard_mirror_write(ev.calendar, synced)
+            if blocked:
+                return {"error": blocked, "exit_code": 1}
             missing_id = reserve_upload_references(
                 get_upload_handler(),
                 owner,
@@ -534,6 +542,8 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             ev = _event_query().filter(CalendarEvent.uid == base_uid).first()
             if not ev:
                 return {"error": f"Event {uid} not found", "exit_code": 1}
+            if is_managed(ev.calendar):
+                return {"error": READ_ONLY_MESSAGE, "exit_code": 1}
             is_caldav = ev.calendar and ev.calendar.source == "caldav" and ev.remote_href
             if is_caldav:
                 _record_caldav_delete_tombstone(db, ev, owner)
