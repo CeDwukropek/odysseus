@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 MANAGED_SOURCE = "wieikschedule"
 LOCAL_FIELDS = frozenset({"color", "importance", "event_type"})
-SYNC_INTERVAL_SECONDS = 5 * 60
+# Background pulls only; an open calendar refreshes every 3 minutes and own edits apply at once.
+SYNC_INTERVAL_SECONDS = 15 * 60
 STALE_AFTER = timedelta(hours=1)
 READ_ONLY_MESSAGE = (
     "Kalendarz „Plan zajęć” pochodzi z wieikschedule: nie można w nim tworzyć wydarzeń "
