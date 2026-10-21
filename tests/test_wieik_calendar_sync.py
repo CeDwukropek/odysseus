@@ -327,3 +327,15 @@ def test_rows_mirrored_before_flags_existed_are_backfilled(store):
     assert apply(store, feed(item('a', added=True)))['updated'] == 1
     assert json.loads(mirror_rows(store)['a'].external_meta)['added'] is True
     assert apply(store, feed(item('a', added=True)))['unchanged'] == 1
+
+
+def test_missing_flags_force_a_full_pull_instead_of_304(store, monkeypatch):
+    apply(store, feed(item('a')))
+    with store() as db:
+        db.query(cdb.CalendarEvent).update({cdb.CalendarEvent.external_meta: None})
+        db.get(cdb.WieikCalendarLink, 'alice').etag = '"old"'
+        db.commit()
+    calls = []
+    monkeypatch.setattr(sync, '_call', fake_call([(SimpleNamespace(headers={'etag': '"old"'}), feed(item('a')))], calls))
+    asyncio.run(sync.sync_owner('alice'))
+    assert calls[0][4] is None and mirror_rows(store)['a'].external_meta is not None

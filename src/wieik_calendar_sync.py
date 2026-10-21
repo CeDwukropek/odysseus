@@ -217,6 +217,11 @@ async def sync_owner(owner) -> dict:
             if link is None:
                 raise SyncError(404, "NOT_LINKED", "Plan zajęć z wieikschedule nie jest połączony.")
             token, etag = decrypt(link.token), link.etag
+            # A full pull (no ETag) backfills rows that predate external_meta.
+            if db.query(CalendarEvent.uid).filter(CalendarEvent.calendar_id == link.calendar_id,
+                                                  CalendarEvent.external_source == MANAGED_SOURCE,
+                                                  CalendarEvent.external_meta.is_(None)).first():
+                etag = None
         attempt = utcnow_naive()
         try:
             response, data = await _call("GET", "/api/calendar-sync/feed", token=token, etag=etag)
