@@ -2644,7 +2644,8 @@ async function _renderWieikSection(overlay, cleanup) {
       <div style="font-size:10px;opacity:0.4;margin-top:4px;">Wygeneruj kod w wieikschedule (Opcje → Kalendarz w Odysseusie). Plan pojawi się jako kalendarz „Plan zajęć” tylko do odczytu; zajęcia zmieniasz w wieikschedule.</div>`;
     box.querySelector('#cal-wieik-pair').addEventListener('click', async (e) => {
       const status = box.querySelector('#cal-wieik-status');
-      e.currentTarget.disabled = true;
+      const button = e.currentTarget;
+    button.disabled = true;
       status.textContent = 'Łączenie…';
       try {
         const res = await fetch(`${API_BASE}/api/calendar/wieik/pair`, {
@@ -2655,7 +2656,7 @@ async function _renderWieikSection(overlay, cleanup) {
         await reopen();
       } catch (err) {
         status.textContent = err.message;
-        e.currentTarget.disabled = false;
+        button.disabled = false;
       }
     });
     return;
@@ -2717,10 +2718,11 @@ async function _renderWieikSection(overlay, cleanup) {
       }));
     }).catch(() => {});
   box.querySelector('#cal-wieik-sync').addEventListener('click', async (e) => {
-    e.currentTarget.disabled = true;
+    const button = e.currentTarget;
+    button.disabled = true;
     status.textContent = 'Synchronizacja…';
     const result = await _syncWieik(true);
-    if (result.error) { status.textContent = result.error; e.currentTarget.disabled = false; return; }
+    if (result.error) { status.textContent = result.error; button.disabled = false; return; }
     await reopen();
   });
   box.querySelector('#cal-wieik-disconnect').addEventListener('click', () => {
@@ -2731,7 +2733,8 @@ async function _renderWieikSection(overlay, cleanup) {
       <span id="cal-wieik-status" style="font-size:11px;opacity:0.7;"></span>`;
     actions.querySelector('#cal-wieik-cancel').addEventListener('click', () => _renderWieikSection(overlay, cleanup));
     actions.querySelector('#cal-wieik-confirm').addEventListener('click', async (e) => {
-      e.currentTarget.disabled = true;
+      const button = e.currentTarget;
+    button.disabled = true;
       try {
         const res = await fetch(`${API_BASE}/api/calendar/wieik`, { method: 'DELETE', credentials: 'same-origin' });
         if (!res.ok) await fail(res);
@@ -2740,7 +2743,7 @@ async function _renderWieikSection(overlay, cleanup) {
         await reopen();
       } catch (err) {
         actions.querySelector('#cal-wieik-status').textContent = err.message;
-        e.currentTarget.disabled = false;
+        button.disabled = false;
       }
     });
   });
@@ -3492,9 +3495,10 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
     if (del) del.lastChild.textContent = existing.plan.added ? 'Usuń dopisek' : 'Odwołaj';
   }
   document.getElementById('cal-f-restore')?.addEventListener('click', async (e) => {
-    e.currentTarget.disabled = true;
+    const button = e.currentTarget;
+    button.disabled = true;
     try { await _restoreWieik(existing.uid); uiModule.showToast('Przywrócono oryginalny termin'); }
-    catch (err) { uiModule.showError(err.message); e.currentTarget.disabled = false; }
+    catch (err) { uiModule.showError(err.message); button.disabled = false; }
   });
   // ── Bespoke-form behavior ──────────────────────────────────────────
   const formEl = body.querySelector('.cal-form');
