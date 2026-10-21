@@ -113,30 +113,87 @@ def test_resync_updates_synced_fields_keeps_local_ones_and_prunes_only_inside_wi
 def test_guard_allows_only_local_fields_on_managed_calendars():
     managed, local = SimpleNamespace(source=sync.MANAGED_SOURCE), SimpleNamespace(source='local')
     assert sync.guard_mirror_write(managed, {'color'}) is None
-    assert sync.guard_mirror_write(managed, {'color', 'dtstart'}) == sync.READ_ONLY_MESSAGE
-    assert sync.guard_mirror_write(managed, None) == sync.READ_ONLY_MESSAGE
+    assert sync.guard_mirror_write(managed, {'color', 'dtstart'}) == sync.AGENT_MESSAGE
+    assert sync.guard_mirror_write(managed, None) == sync.AGENT_MESSAGE
     assert sync.guard_mirror_write(local, {'dtstart'}) is None
 
 
-def test_ui_routes_refuse_plan_changes_but_allow_color(store):
-    apply(store, feed(item('a')))
+def test_ui_edits_are_written_to_wieikschedule_and_unsupported_fields_refused(store, monkeypatch):
+    apply(store, feed(item('a', version='0123456789abcdef')))
     uid = sync.mirror_uid('alice', 'a')
+    calls = []
+    ok = (SimpleNamespace(headers={}), {'ok': True, 'status': 'applied'})
+    pulled = (SimpleNamespace(headers={'etag': '"v2"'}), feed(item('a', start='12:00:00', modified=True, version='fedcba9876543210')))
+    monkeypatch.setattr(sync, '_call', fake_call([ok, pulled], calls))
     create = route('POST', '/events')
     with pytest.raises(HTTPException) as ex:
         asyncio.run(create(request('alice'), routes.EventCreate(summary='X', dtstart='2026-10-19T10:00:00', calendar_href=MIRROR)))
     assert ex.value.status_code == 409
     update = route('PUT', '/events/{uid}')
+    # The form resends unchanged fields; times may carry the browser offset (CEST = UTC+2).
+    result = asyncio.run(update(request('alice'), uid, routes.EventUpdate(
+        summary='Modelowanie układów dynamicznych (laboratorium)', description=mirror_rows(store)['a'].description,
+        dtstart='2026-10-19T12:00:00+02:00', dtend='2026-10-19T13:30:00+02:00', all_day=False, rrule='', location='12')))
+    assert result == {'ok': True, 'plan_changed': True}
+    method, path, token, body, _ = calls[0]
+    assert (method, path, token) == ('POST', '/api/calendar-sync/changes', 'wkc_token')
+    assert body['operation'] == 'modify' and body['values'] == {'start_time': '12:00:00'}
+    assert body['event_id'] == 'a' and body['expected_version'] == '0123456789abcdef' and body['mode'] == 'apply'
+    row = mirror_rows(store)['a']
+    assert row.dtstart == datetime(2026, 10, 19, 12, 0) and json.loads(row.external_meta)['modified'] is True
     with pytest.raises(HTTPException) as ex:
-        asyncio.run(update(request('alice'), uid, routes.EventUpdate(dtstart='2026-10-20T07:30:00')))
-    assert ex.value.status_code == 409 and 'wieikschedule' in ex.value.detail
-    assert asyncio.run(update(request('alice'), uid, routes.EventUpdate(color='#00ff00')))['ok']
-    with pytest.raises(HTTPException) as ex:
-        asyncio.run(route('DELETE', '/events/{uid}')(request('alice'), uid))
-    assert ex.value.status_code == 409
-    assert mirror_rows(store)['a'].dtstart == datetime(2026, 10, 19, 7, 30)
+        asyncio.run(update(request('alice'), uid, routes.EventUpdate(summary='Inny tytuł')))
+    assert ex.value.status_code == 422
+    assert asyncio.run(update(request('alice'), uid, routes.EventUpdate(color='#00ff00'))) == {'ok': True, 'plan_changed': False}
+    assert mirror_rows(store)['a'].color == '#00ff00' and len(calls) == 2
     with pytest.raises(HTTPException) as ex:
         asyncio.run(route('PUT', '/default-calendar')(request('alice', {'calendar_href': MIRROR})))
     assert ex.value.status_code == 409
+
+
+def test_plan_edit_maps_time_length_and_room_and_ignores_resent_values():
+    row = {'summary': 'S', 'description': 'D', 'location': '12', 'all_day': False,
+           'dtstart': datetime(2026, 10, 19, 7, 30), 'dtend': datetime(2026, 10, 19, 9, 0)}
+    same = {'summary': 'S', 'description': 'D', 'location': '12', 'all_day': False, 'rrule': '',
+            'dtstart': row['dtstart'], 'dtend': row['dtend'], 'color': '#fff'}
+    assert sync.plan_edit(row, same) == ({}, {'color': '#fff'})
+    moved = {'dtstart': datetime(2026, 10, 20, 9, 15), 'dtend': datetime(2026, 10, 20, 11, 15), 'location': ' '}
+    assert sync.plan_edit(row, moved)[0] == {'date': '2026-10-20', 'start_time': '09:15:00', 'duration_min': 120, 'room': ''}
+    for bad in ({'dtstart': datetime(2026, 10, 19, 23, 0), 'dtend': datetime(2026, 10, 20, 1, 0)},
+                {'rrule': 'FREQ=WEEKLY'}, {'all_day': True}, {'description': 'nowy opis'}):
+        with pytest.raises(sync.SyncError):
+            sync.plan_edit(row, bad)
+    assert sync.local_wall_clock(datetime(2026, 10, 19, 10, 0), True) == datetime(2026, 10, 19, 12, 0)
+    assert sync.local_wall_clock(datetime(2026, 12, 1, 10, 0), True) == datetime(2026, 12, 1, 11, 0)
+
+
+def test_delete_cancels_privately_restore_and_conflicts_refresh_the_mirror(store, monkeypatch):
+    apply(store, feed(item('a', version='0123456789abcdef')))
+    uid = sync.mirror_uid('alice', 'a')
+    calls = []
+    cancelled = (SimpleNamespace(headers={'etag': '"c"'}), feed(item('a', status='cancelled', version='1111111111111111')))
+    restored = (SimpleNamespace(headers={'etag': '"r"'}), feed(item('a', version='2222222222222222')))
+    conflict = sync.SyncError(409, 'PLAN_CHANGED', 'Plan zmienił się w międzyczasie.')
+    monkeypatch.setattr(sync, '_call', fake_call([
+        (SimpleNamespace(headers={}), {'ok': True, 'status': 'applied', 'result': {}}), cancelled,
+        (SimpleNamespace(headers={}), {'ok': True, 'status': 'applied'}), restored,
+        conflict, restored,
+    ], calls))
+    asyncio.run(route('DELETE', '/events/{uid}')(request('alice'), uid))
+    assert calls[0][3]['operation'] == 'remove'
+    assert mirror_rows(store)['a'].status == 'cancelled'
+    listed = asyncio.run(route('GET', '/wieik/cancelled')(request('alice')))
+    assert [ev['uid'] for ev in listed['events']] == [uid]
+    asyncio.run(route('POST', '/wieik/restore')(request('alice', {'uid': uid})))
+    assert calls[2][3]['operation'] == 'restore' and calls[2][3]['expected_version'] == '1111111111111111'
+    assert mirror_rows(store)['a'].status == 'confirmed'
+    with pytest.raises(HTTPException) as ex:
+        asyncio.run(route('PUT', '/events/{uid}')(request('alice'), uid, routes.EventUpdate(location='A2')))
+    assert ex.value.status_code == 409
+    assert calls[-1][1] == '/api/calendar-sync/feed'
+    with pytest.raises(HTTPException) as ex:
+        asyncio.run(route('POST', '/wieik/restore')(request('bob', {'uid': uid})))
+    assert ex.value.status_code == 404
 
 
 def test_implicit_default_calendar_is_never_the_mirror(store):

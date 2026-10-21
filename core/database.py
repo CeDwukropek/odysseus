@@ -1888,6 +1888,7 @@ class CalendarEvent(TimestampMixin, Base):
     external_source  = Column(String, nullable=True, index=True)
     external_id      = Column(String, nullable=True)
     external_version = Column(String, nullable=True)
+    external_meta    = Column(Text, nullable=True)   # JSON flags from the source (added, modified)
 
     calendar = relationship("CalendarCal", back_populates="events")
 
@@ -2600,7 +2601,7 @@ def _migrate_add_calendar_external_identity():
         columns = [row[1] for row in conn.execute("PRAGMA table_info(calendar_events)").fetchall()]
         if not columns:
             return
-        for name in ("external_source", "external_id", "external_version"):
+        for name in ("external_source", "external_id", "external_version", "external_meta"):
             if name not in columns:
                 conn.execute(f"ALTER TABLE calendar_events ADD COLUMN {name} TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_calendar_events_external_source ON calendar_events(external_source)")

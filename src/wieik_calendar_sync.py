@@ -3,10 +3,13 @@
 wieikschedule (Supabase) stays the only source of the plan. Odysseus pulls the
 effective plan of one linked user into a calendar with source "wieikschedule".
 Synced fields are owned by the feed; color, importance, event type and pings
-remain local. Writers other than this module must not change mirror rows
-except for those local fields (see ``guard_mirror_write``).
+remain local. A user's own edit of time, length or room is written through to
+wieikschedule as a private change (``edit_from_ui``), checked against the
+occurrence version last pulled. Other writers must not change synced fields
+(see ``guard_mirror_write``).
 """
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -22,11 +25,19 @@ logger = logging.getLogger(__name__)
 
 MANAGED_SOURCE = "wieikschedule"
 LOCAL_FIELDS = frozenset({"color", "importance", "event_type"})
-SYNC_INTERVAL_SECONDS = 15 * 60
+SYNC_INTERVAL_SECONDS = 5 * 60
 STALE_AFTER = timedelta(hours=1)
 READ_ONLY_MESSAGE = (
-    "Ten kalendarz to plan zajęć z wieikschedule. Zmień te zajęcia w wieikschedule; "
-    "tutaj możesz zmienić tylko kolor, ważność i typ wydarzenia."
+    "Kalendarz „Plan zajęć” pochodzi z wieikschedule: nie można w nim tworzyć wydarzeń "
+    "ani ustawić go jako domyślnego. Zajęcia przesuniesz lub odwołasz, edytując je w kalendarzu."
+)
+AGENT_MESSAGE = (
+    "Agent nie zmienia planu zajęć bezpośrednio. Przesuń lub odwołaj zajęcia w kalendarzu "
+    "albo w wieikschedule; agent może zmienić tylko ważność i typ wydarzenia."
+)
+PLAN_FIELDS_MESSAGE = (
+    "W planie zajęć zmienisz termin, czas trwania i salę. Tytuł, opis i powtarzanie "
+    "pochodzą z wieikschedule; kolor, ważność i typ wydarzenia zmieniasz tutaj."
 )
 _NAMESPACE = uuid.UUID("5f0d7a52-8d0c-4d1e-9a39-6c1b8a3e2f10")
 _KIND_LABELS = {"laboratory": "laboratorium", "lecture": "wykład", "exercise": "ćwiczenia",
@@ -49,7 +60,7 @@ def guard_mirror_write(cal, fields=()):
     if not is_managed(cal):
         return None
     if fields is None or set(fields) - LOCAL_FIELDS:
-        return READ_ONLY_MESSAGE
+        return AGENT_MESSAGE
     return None
 
 
@@ -144,6 +155,7 @@ def apply_feed(db, cal, owner, payload) -> dict:
         for key, value in fields.items():
             setattr(row, key, value)
         row.external_version = item["version"]
+        row.external_meta = json.dumps({"added": bool(item.get("added")), "modified": bool(item.get("modified"))})
     # Only prune inside the window the feed covered; older history stays.
     window_start = datetime.strptime(payload["date_from"], "%Y-%m-%d")
     window_end = datetime.strptime(payload["date_to"], "%Y-%m-%d") + timedelta(days=1)
@@ -276,3 +288,152 @@ async def sync_loop() -> None:
             await sync_all()
         except Exception:
             logger.exception("wieikschedule calendar sync loop iteration failed")
+
+
+def plan_meta(row) -> dict:
+    try:
+        meta = json.loads(row.external_meta or "{}")
+    except ValueError:
+        meta = {}
+    return {"added": bool(meta.get("added")), "modified": bool(meta.get("modified")),
+            "cancelled": row.status == "cancelled"}
+
+
+def snapshot(row) -> dict:
+    """Detached copy of a mirror row, so network calls run without an open DB session."""
+    return {"uid": row.uid, "external_id": row.external_id, "external_version": row.external_version,
+            "summary": row.summary or "", "description": row.description or "", "location": row.location or "",
+            "dtstart": row.dtstart, "dtend": row.dtend, "all_day": bool(row.all_day), "status": row.status,
+            "meta": plan_meta(row)}
+
+
+def plan_edit(row, changes) -> tuple[dict, dict]:
+    """Split an edit of a mirror row into plan values for wieikschedule and local-only fields.
+
+    ``changes`` holds the submitted fields with dtstart/dtend already as local
+    (Europe/Warsaw) naive datetimes. Unchanged values that UIs resend are ignored.
+    """
+    values, local = {}, {}
+    for key, value in changes.items():
+        if value is None or key in ("dtstart", "dtend", "location"):
+            continue
+        if key in LOCAL_FIELDS:
+            local[key] = value
+        elif key in ("summary", "description") and value == row[key]:
+            continue
+        elif key == "all_day" and bool(value) == row["all_day"]:
+            continue
+        elif key == "rrule" and not value:
+            continue
+        else:
+            raise SyncError(422, "READ_ONLY_FIELD", PLAN_FIELDS_MESSAGE)
+    start, end = changes.get("dtstart") or row["dtstart"], changes.get("dtend") or row["dtend"]
+    if (start, end) != (row["dtstart"], row["dtend"]):
+        if row["all_day"]:
+            raise SyncError(422, "DAY_OFF", "Dni wolnych nie można przesuwać.")
+        if end <= start or start.date() != end.date():
+            raise SyncError(422, "INVALID_TIME", "Zajęcia muszą zaczynać się i kończyć tego samego dnia.")
+        if start.date() != row["dtstart"].date():
+            values["date"] = start.strftime("%Y-%m-%d")
+        if start.time() != row["dtstart"].time():
+            values["start_time"] = start.strftime("%H:%M:00")
+        duration = int((end - start).total_seconds() // 60)
+        if duration != int((row["dtend"] - row["dtstart"]).total_seconds() // 60):
+            values["duration_min"] = duration
+    location = changes.get("location")
+    if location is not None and location.strip() != row["location"]:
+        values["room"] = location.strip()
+    return values, local
+
+
+async def _write(owner, row, operation, values=None, mode="apply") -> dict:
+    with SessionLocal() as db:
+        link = _link(db, owner)
+        if link is None:
+            raise SyncError(404, "NOT_LINKED", "Plan zajęć z wieikschedule nie jest połączony.")
+        token = decrypt(link.token)
+    body = {"event_id": row["external_id"], "operation": operation, "expected_version": row["external_version"],
+            "request_id": uuid.uuid4().hex, "mode": mode, **({"values": values} if values else {})}
+    try:
+        _, data = await _call("POST", "/api/calendar-sync/changes", token=token, body=body)
+    except SyncError as error:
+        if error.code in ("PLAN_CHANGED", "NOT_IN_PLAN"):
+            await _refresh_quietly(owner)
+        raise
+    if mode == "apply":
+        await _refresh_quietly(owner)
+    return data
+
+
+async def _refresh_quietly(owner):
+    # The write already succeeded or failed on its own; a failed refresh is recorded in the link status.
+    try:
+        await sync_owner(owner)
+    except SyncError:
+        pass
+
+
+def _mirror_row(owner, uid):
+    with SessionLocal() as db:
+        row = (db.query(CalendarEvent).join(CalendarCal)
+               .filter(CalendarEvent.uid == uid, CalendarCal.owner == owner,
+                       CalendarEvent.external_source == MANAGED_SOURCE).first())
+        if row is None:
+            raise SyncError(404, "NOT_FOUND", "Nie znaleziono zajęć w planie.")
+        return snapshot(row)
+
+
+def _save_local(owner, uid, local):
+    if not local:
+        return
+    with SessionLocal() as db:
+        row = (db.query(CalendarEvent).join(CalendarCal)
+               .filter(CalendarEvent.uid == uid, CalendarCal.owner == owner).first())
+        if row is not None:
+            for key, value in local.items():
+                setattr(row, key, value or None)
+            db.commit()
+
+
+async def edit_from_ui(owner, uid, changes) -> dict:
+    """A user's own edit in the calendar: plan fields go to wieikschedule at once, local ones stay here."""
+    row = _mirror_row(owner, uid)
+    values, local = plan_edit(row, changes)
+    if values:
+        await _write(owner, row, "modify", values)
+    _save_local(owner, uid, local)
+    return {"ok": True, "plan_changed": bool(values)}
+
+
+async def remove_from_ui(owner, uid) -> dict:
+    row = _mirror_row(owner, uid)
+    if row["all_day"]:
+        raise SyncError(422, "DAY_OFF", "Dni wolnych nie można usuwać.")
+    data = await _write(owner, row, "remove")
+    return {"ok": True, "result": data.get("result")}
+
+
+async def restore_from_ui(owner, uid) -> dict:
+    row = _mirror_row(owner, uid)
+    await _write(owner, row, "restore")
+    return {"ok": True}
+
+
+def cancelled(owner, since) -> list:
+    """Privately cancelled classes; hidden from calendar views, listed so they can be restored."""
+    with SessionLocal() as db:
+        rows = (db.query(CalendarEvent).join(CalendarCal)
+                .filter(CalendarCal.owner == owner, CalendarCal.source == MANAGED_SOURCE,
+                        CalendarEvent.status == "cancelled", CalendarEvent.dtstart >= since)
+                .order_by(CalendarEvent.dtstart).limit(100).all())
+        return [{"uid": row.uid, "summary": row.summary, "dtstart": row.dtstart.isoformat(),
+                 "location": row.location or ""} for row in rows]
+
+
+def local_wall_clock(value, is_utc):
+    """Mirror rows store Europe/Warsaw wall-clock time; convert parsed UTC instants back to it."""
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+    if not is_utc:
+        return value
+    return value.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Europe/Warsaw")).replace(tzinfo=None)

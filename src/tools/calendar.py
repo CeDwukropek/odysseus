@@ -30,7 +30,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
         _record_caldav_delete_tombstone,
     )
     from src.calendar_defaults import default_calendar_id, resolve_calendar
-    from src.wieik_calendar_sync import READ_ONLY_MESSAGE, guard_mirror_write, is_managed
+    from src.wieik_calendar_sync import AGENT_MESSAGE, READ_ONLY_MESSAGE, guard_mirror_write, is_managed
     import uuid as _uuid
 
     try:
@@ -543,7 +543,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
             if not ev:
                 return {"error": f"Event {uid} not found", "exit_code": 1}
             if is_managed(ev.calendar):
-                return {"error": READ_ONLY_MESSAGE, "exit_code": 1}
+                return {"error": AGENT_MESSAGE, "exit_code": 1}
             is_caldav = ev.calendar and ev.calendar.source == "caldav" and ev.remote_href
             if is_caldav:
                 _record_caldav_delete_tombstone(db, ev, owner)

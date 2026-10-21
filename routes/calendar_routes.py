@@ -19,8 +19,7 @@ from src.calendar_defaults import default_calendar_id, resolve_calendar
 from src.upload_limits import read_upload_limited, ICS_MAX_BYTES
 from src.upload_handler import reserve_upload_references
 import src.wieik_calendar_sync as wieik_sync
-from src.wieik_calendar_sync import (MANAGED_SOURCE, READ_ONLY_MESSAGE, SyncError, guard_mirror_write,
-                                     is_managed)
+from src.wieik_calendar_sync import MANAGED_SOURCE, READ_ONLY_MESSAGE, SyncError, is_managed
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +648,7 @@ def _event_to_dict(ev: CalendarEvent) -> dict:
         "calendar_href": ev.calendar_id,
         "color": ev.color or (ev.calendar.color if ev.calendar else ""),
         "event_type": getattr(ev, "event_type", None),
+        "plan": wieik_sync.plan_meta(ev) if getattr(ev, "external_source", None) == MANAGED_SOURCE else None,
         "importance": getattr(ev, "importance", None) or "normal",
     }
 
@@ -1117,6 +1117,22 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
     async def wieik_sync_now(request: Request):
         return await _wieik_call(wieik_sync.sync_owner, _require_user(request))
 
+    @router.post("/wieik/restore")
+    async def wieik_restore(request: Request):
+        owner = _require_user(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict) or set(body) != {"uid"} or not isinstance(body["uid"], str):
+            raise HTTPException(422, "Podaj tylko uid zajęć.")
+        return await _wieik_call(wieik_sync.restore_from_ui, owner, body["uid"])
+
+    @router.get("/wieik/cancelled")
+    async def wieik_cancelled(request: Request):
+        owner = _require_user(request)
+        return {"events": wieik_sync.cancelled(owner, datetime.now() - timedelta(days=14))}
+
     @router.delete("/wieik")
     async def wieik_disconnect(request: Request):
         return await _wieik_call(wieik_sync.disconnect, _require_user(request))
@@ -1320,9 +1336,14 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         db = SessionLocal()
         try:
             ev = _get_or_404_event(db, base_uid, owner)
-            blocked = guard_mirror_write(ev.calendar, {k for k, v in data.model_dump().items() if v is not None})
-            if blocked:
-                raise HTTPException(409, blocked)
+            if is_managed(ev.calendar):
+                changes = data.model_dump()
+                for key in ("dtstart", "dtend"):
+                    if changes[key] is not None:
+                        changes[key] = wieik_sync.local_wall_clock(*_parse_dt_pair(changes[key]))
+                # End the read transaction before the network round trip and mirror refresh.
+                db.rollback()
+                return await _wieik_call(wieik_sync.edit_from_ui, owner, base_uid, changes)
             if data.summary is not None:
                 ev.summary = data.summary
             if data.description is not None:
@@ -1376,7 +1397,8 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         try:
             ev = _get_or_404_event(db, base_uid, owner)
             if is_managed(ev.calendar):
-                raise HTTPException(409, READ_ONLY_MESSAGE)
+                db.rollback()
+                return await _wieik_call(wieik_sync.remove_from_ui, owner, base_uid)
             is_occurrence_delete = scope in {"occurrence", "instance"} and "::" in uid and bool(ev.rrule)
             is_caldav = ev.calendar and ev.calendar.source == "caldav"
             if is_occurrence_delete:

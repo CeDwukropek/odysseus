@@ -253,6 +253,32 @@ async function _responseError(r) {
   return new Error((body && (body.detail || body.error)) || ('HTTP ' + r.status));
 }
 
+// Plan changes are applied in wieikschedule and pulled back; drop caches to show the result.
+function _reloadAfterPlanChange() {
+  _allEvents = {}; _fetchedRanges = [];
+  try { localStorage.removeItem(LS_KEY); } catch (_) {}
+  if (_open) _render();
+}
+
+async function _restoreWieik(uid) {
+  const res = await fetch(`${API_BASE}/api/calendar/wieik/restore`, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid }),
+  });
+  if (!res.ok) throw await _responseError(res);
+  _reloadAfterPlanChange();
+}
+
+// While the calendar is open, pull plan changes made in wieikschedule every few minutes.
+let _wieikTimer = null;
+function _startWieikPolling() {
+  const linked = () => _calendars.some(c => c.source === 'wieikschedule');
+  if (linked()) _syncWieik(false);
+  clearInterval(_wieikTimer);
+  _wieikTimer = setInterval(() => { if (_open && !document.hidden && linked()) _syncWieik(false); }, 180000);
+}
+function _stopWieikPolling() { clearInterval(_wieikTimer); _wieikTimer = null; }
+
 function _optimisticEvent(data, uid) {
   const cal = _calendars.find(c => c.href === data.calendar_href) || _calendars.find(c => c.is_default) || _calendars[0];
   return {
@@ -323,7 +349,9 @@ async function _updateEvent(uid, data) {
   }).then(async r => {
     if (!r.ok) throw await _responseError(r);
     _showPendingSync(await r.json());
-    if (isRecurring) {
+    if (_preMergeBackup?.plan) {
+      _reloadAfterPlanChange();
+    } else if (isRecurring) {
       _fetchedRanges = [];
       localStorage.removeItem(LS_KEY);
     } else {
@@ -378,7 +406,9 @@ async function _deleteEvent(uid, { scope = 'series' } = {}) {
     // deleted from desktop while mobile was open (and vice versa).
     if (!r.ok && r.status !== 404) throw await _responseError(r);
     if (r.ok) _showPendingSync(await r.json());
-    if (isRecurring) {
+    if (Object.values(backups).some(ev => ev?.plan)) {
+      _reloadAfterPlanChange();
+    } else if (isRecurring) {
       _fetchedRanges = [];
       localStorage.removeItem(LS_KEY);
     } else {
@@ -524,7 +554,13 @@ async function _confirmAndDeleteEvent(ev) {
   if (!ev) return;
   const name = ev.summary ? `"${ev.summary}"` : 'this event';
   let scope = 'series';
-  if (_isRecurringEvent(ev)) {
+  if (ev.plan) {
+    const question = ev.plan.added
+      ? `Usunąć dopisane zajęcia ${name} z planu?`
+      : `Odwołać prywatnie ${name}? Zmiana trafi do wieikschedule; przywrócisz je w ustawieniach kalendarza.`;
+    const ok = await uiModule.styledConfirm(question, { confirmText: ev.plan.added ? 'Usuń dopisek' : 'Odwołaj', danger: true });
+    if (!ok) return;
+  } else if (_isRecurringEvent(ev)) {
     scope = await _chooseRecurringDeleteScope(ev);
     if (!scope) return;
   } else {
@@ -2615,12 +2651,29 @@ async function _renderWieikSection(overlay, cleanup) {
     <div style="font-size:11px;opacity:0.6;margin-top:2px;">Ostatnia synchronizacja: ${_e(when(st.last_success_at))}</div>
     ${st.last_error ? `<div style="font-size:11px;color:var(--red);margin-top:2px;">${_e(st.last_error)}</div>` : ''}
     ${st.stale && !st.last_error ? `<div style="font-size:11px;opacity:0.7;margin-top:2px;">Plan może być nieaktualny.</div>` : ''}
+    <div id="cal-wieik-cancelled" style="margin-top:6px;"></div>
     <div id="cal-wieik-actions" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px;">
       <button id="cal-wieik-sync" type="button" style="${btn}">Odśwież teraz</button>
       <button id="cal-wieik-disconnect" type="button" style="${btn}">Rozłącz</button>
       <span id="cal-wieik-status" style="font-size:11px;opacity:0.7;"></span>
     </div>`;
   const status = box.querySelector('#cal-wieik-status');
+  fetch(`${API_BASE}/api/calendar/wieik/cancelled`, { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : { events: [] })
+    .then(({ events = [] }) => {
+      const list = box.querySelector('#cal-wieik-cancelled');
+      if (!list || !events.length) return;
+      list.innerHTML = `<div style="font-size:11px;opacity:0.6;">Odwołane prywatnie:</div>` + events.map(ev => `
+        <div style="display:flex;gap:6px;align-items:center;font-size:11px;margin-top:2px;">
+          <span>${_e(new Date(ev.dtstart).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }))} — ${_e(ev.summary)}</span>
+          <button type="button" class="cal-wieik-restore" data-uid="${_e(ev.uid)}" style="${btn}font-size:11px;padding:1px 6px;">Przywróć</button>
+        </div>`).join('');
+      list.querySelectorAll('.cal-wieik-restore').forEach(b => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await _restoreWieik(b.dataset.uid); await reopen(); }
+        catch (err) { status.textContent = err.message; b.disabled = false; }
+      }));
+    }).catch(() => {});
   box.querySelector('#cal-wieik-sync').addEventListener('click', async (e) => {
     e.currentTarget.disabled = true;
     status.textContent = 'Synchronizacja…';
@@ -3106,7 +3159,9 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
       ${_calendars.length > 1 ? `<select id="cal-f-cal" class="cal-input cal-f-cal-select">${calOpts}</select>` : ''}
     </div>
 
+    ${existing?.plan ? `<div class="cal-plan-note" style="font-size:11px;opacity:0.7;margin:6px 0;">Plan zajęć z wieikschedule — zmiana terminu, długości lub sali zapisze się tam jako Twoja prywatna zmiana.${existing.plan.modified ? ' Termin jest już zmieniony prywatnie.' : ''}</div>` : ''}
     <div class="cal-form-actions">
+      ${existing?.plan?.modified ? `<button id="cal-f-restore" class="cal-btn" style="display:inline-flex;align-items:center;gap:5px;">Przywróć termin</button>` : ''}
       ${isEdit ? `<button id="cal-f-del" class="cal-btn cal-btn-danger" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>Delete</button>` : ''}
       <button id="cal-f-cancel" class="cal-btn" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
       <button id="cal-f-save" class="cal-btn cal-btn-primary" style="display:inline-flex;align-items:center;gap:5px;">${isEdit
@@ -3385,6 +3440,20 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
   document.getElementById('cal-f-del')?.addEventListener('click', async () => {
     await _confirmAndDeleteEvent(existing);
   });
+  if (existing?.plan) {
+    // Title, description, recurrence and calendar come from wieikschedule.
+    ['cal-f-sum', 'cal-f-desc', 'cal-f-rrule', 'cal-f-allday', 'cal-f-cal'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = true;
+    });
+    const del = document.getElementById('cal-f-del');
+    if (del) del.lastChild.textContent = existing.plan.added ? 'Usuń dopisek' : 'Odwołaj';
+  }
+  document.getElementById('cal-f-restore')?.addEventListener('click', async (e) => {
+    e.currentTarget.disabled = true;
+    try { await _restoreWieik(existing.uid); uiModule.showToast('Przywrócono oryginalny termin'); }
+    catch (err) { uiModule.showError(err.message); e.currentTarget.disabled = false; }
+  });
   // ── Bespoke-form behavior ──────────────────────────────────────────
   const formEl = body.querySelector('.cal-form');
   const detailsEl = document.getElementById('cal-form-details');
@@ -3660,9 +3729,11 @@ function openCalendar() {
   if (Modals.isMinimized('calendar-modal')) {
     Modals.restore('calendar-modal');
     _open = true;
+    _startWieikPolling();
     return;
   }
   _open = true;
+  _startWieikPolling();
   if (_todayCount() > 0) { _markBadgeSeen(); _updateBadge(); }
   _collapseSidebar();
   const modal = _getModal();
@@ -3767,6 +3838,7 @@ let _highlightEventUid = null;
 
 function _doCloseCalendar() {
   _open = false;
+  _stopWieikPolling();
   _restoreSidebar();
   if (_modal) {
     _modal.style.display = 'none';
