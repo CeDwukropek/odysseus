@@ -152,7 +152,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 return value
         return None
 
-    def _create_calendar_reminder(summary: str, location: str, dtstart: datetime,
+    def _create_lendar_reminder(summary: str, location: str, dtstart: datetime,
                                   all_day: bool, minutes_before: int,
                                   is_utc: bool = False) -> tuple[Optional[str], Optional[str]]:
         remind_at = dtstart - timedelta(minutes=minutes_before)
@@ -246,7 +246,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 CalendarEvent.dtend > start_dt,
                 CalendarEvent.status != "cancelled",
             )
-            calendar_filter = args.get("calendar")
+            calendar_filter = args.get("calendar") or args.get("calendar_href")
             if calendar_filter:
                 q = q.filter(
                     (CalendarEvent.calendar_id == calendar_filter) |
@@ -258,8 +258,26 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 if ev.all_day:
                     s, e = ev.dtstart.strftime("%Y-%m-%d"), ev.dtend.strftime("%Y-%m-%d")
                 else:
-                    suffix = "Z" if getattr(ev, "is_utc", False) else ""
-                    s, e = ev.dtstart.isoformat() + suffix, ev.dtend.isoformat() + suffix
+                    from datetime import timezone
+                    from zoneinfo import ZoneInfo
+
+                    display_tz = ZoneInfo("Europe/Warsaw")
+                    start_display = ev.dtstart
+                    end_display = ev.dtend
+
+                    if getattr(ev, "is_utc", False):
+                        if start_display.tzinfo is None:
+                            start_display = start_display.replace(tzinfo=timezone.utc)
+                        if end_display.tzinfo is None:
+                            end_display = end_display.replace(tzinfo=timezone.utc)
+
+                    if start_display.tzinfo is not None:
+                        start_display = start_display.astimezone(display_tz)
+                    if end_display.tzinfo is not None:
+                        end_display = end_display.astimezone(display_tz)
+
+                    s = start_display.isoformat()
+                    e = end_display.isoformat()
                 events.append({
                     "uid": ev.uid, "summary": ev.summary or "", "dtstart": s, "dtend": e,
                     "all_day": ev.all_day, "description": ev.description or "",

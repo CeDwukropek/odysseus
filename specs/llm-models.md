@@ -28,6 +28,8 @@ This spec covers model/provider behavior in:
 
 ## Provider Calls
 
+Opt-in Responses transport, configuration, stateless tool continuation, and validation are documented in [llm-responses.md](llm-responses.md).
+
 `src.llm_core` owns provider-call mechanics. It handles OpenAI-compatible calls, Ollama normalization, Anthropic payload conversion, GitHub Copilot and ChatGPT Subscription provider detection/header injection, NVIDIA provider routing, streaming, fallback calls, upstream error formatting, async/streaming host liveness caching, configured model-list cache reads, tool-call sanitization, reasoning/thinking stream routing, and provider-specific parameter rules. GitHub Copilot OAuth/device-flow orchestration lives in `routes/copilot_routes.py` and `src/copilot.py`; ChatGPT Subscription device flow uses `routes/chatgpt_subscription_routes.py`, shared device-flow helpers, and `ProviderAuthSession` rows.
 
 `llm_core` owns payload shape. Route files and chat/agent code should request a call; they should not duplicate provider-specific payload quirks.

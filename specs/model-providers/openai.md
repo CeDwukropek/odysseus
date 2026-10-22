@@ -22,6 +22,8 @@ items, and typed stream events. OpenAI may support a parameter at the platform
 level while individual models differ. A later model registry or probe must
 scope that fact before it becomes canonical model capability.
 
+Runtime Responses configuration and limits: [llm-responses.md](../llm-responses.md).
+
 ## Fallback And Safety
 
 An explicit endpoint kind selects this provider. Automatic reader detection accepts exact `openai.com` or a dot-delimited subdomain after normalizing case/trailing dots; it is a normalization hint rather than a trust boundary. Do not parse model IDs or ownership labels. If a proxy returns richer fields while explicitly configured as OpenAI, the reader preserves them as raw evidence but keeps capability unknown.

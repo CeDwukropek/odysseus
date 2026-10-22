@@ -8,12 +8,16 @@ services:
     # registry build. For production, pin an immutable tag via ODYSSEUS_IMAGE
     # — e.g. ghcr.io/odysseus-dev/odysseus:1.0.2-7c8070f (X.Y.Z-<sha>) — since
     # :latest and bare :X.Y.Z tags move on every main push.
-    image: ${ODYSSEUS_IMAGE:-ghcr.io/odysseus-dev/odysseus:latest}
+    image: odysseus-custom:local
     build: .
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
     volumes:
       - ${APP_DATA_DIR:-./data}:/app/data:z
+      # Syncthing-managed Obsidian vault. Kept as a dedicated, narrowly scoped
+      # mount so Odysseus can manage project/task Markdown without access to
+      # the rest of Syncthing's configuration or state.
+      - /srv/syncthing/notes:/app/obsidian:rw
       - ${APP_LOGS_DIR:-./logs}:/app/logs:z
       # Cookbook remote-server SSH identity. Odysseus can generate a key here;
       # add the shown public key to each remote server's authorized_keys.

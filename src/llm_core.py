@@ -10,11 +10,15 @@ import threading
 import re
 import os
 import math
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, aclosing
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
 from urllib.parse import urlparse
+from src.responses_adapter import (
+    protocol_options, responses_url, endpoint_base, build_payload as _build_responses_payload,
+    normalize_response, ResponsesStream,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1670,7 +1674,7 @@ def _is_untrusted_context_content(content) -> bool:
 _REFERENCE_CONTEXT_BOUNDARY = "Reference context received."
 
 
-def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
+def _sanitize_llm_messages(messages: List[Dict], *, preserve_responses: bool = False) -> List[Dict]:
     """Strip Odysseus-only metadata before sending messages to providers.
 
     Per the OpenAI chat format: user/system messages must have content; a tool
@@ -1682,6 +1686,8 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
     it leaves the tool result dangling and breaks the next round.
     """
     allowed = {"role", "content", "name", "tool_call_id", "tool_calls", "function_call", "reasoning_content"}
+    if preserve_responses:
+        allowed.update({"_responses_output", "_responses_origin"})
     cleaned = []
     for msg in messages or []:
         if not isinstance(msg, dict):
@@ -1968,8 +1974,14 @@ def normalize_model_id(
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
+             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
+             api_mode: Optional[str] = None, reasoning_effort: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
+    api_mode, reasoning_effort = _resolve_protocol_options(url, model, api_mode, reasoning_effort)
+    if api_mode == "responses":
+        return _responses_call(url, model, messages, headers, timeout, max_tokens, reasoning_effort)
+    if url.rstrip("/").endswith("/responses") and _detect_provider(url) != "chatgpt-subscription":
+        url = endpoint_base(url)
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
     # double-encoded) — otherwise h.update() throws "dictionary update sequence
@@ -2001,6 +2013,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
     cache_key = _get_cache_key(
         url, model, messages_copy, temperature, max_tokens, headers=headers,
     )
+    if reasoning_effort is not None:
+        cache_key = hashlib.sha256(f"{cache_key}:reasoning:{reasoning_effort}".encode()).hexdigest()
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -2034,6 +2048,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         _apply_local_generation_stability(payload, target_url, model)
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
     try:
         note_model_activity(target_url, model)
         r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
@@ -2273,8 +2289,18 @@ async def llm_call_async(
     workload: str = "foreground",
     availability_only_transport: bool = False,
     return_model_metadata: bool = False,
+    api_mode: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str | tuple[str, str]:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
+    api_mode, reasoning_effort = _resolve_protocol_options(url, model, api_mode, reasoning_effort)
+    if api_mode == "responses" and _detect_provider(url) != "chatgpt-subscription":
+        return await _responses_call_async(
+            url, model, messages, headers, timeout, max_tokens, reasoning_effort,
+            max_retries, workload, return_model_metadata,
+        )
+    if url.rstrip("/").endswith("/responses") and _detect_provider(url) != "chatgpt-subscription":
+        url = endpoint_base(url)
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(messages)
 
@@ -2294,6 +2320,8 @@ async def llm_call_async(
     cache_key = _get_cache_key(
         url, model, messages_copy, temperature, max_tokens, headers=headers,
     )
+    if reasoning_effort is not None:
+        cache_key = hashlib.sha256(f"{cache_key}:reasoning:{reasoning_effort}".encode()).hexdigest()
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -2397,6 +2425,8 @@ async def llm_call_async(
             payload["think"] = False
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
 
@@ -2545,6 +2575,220 @@ async def llm_call_async(
                 f"POST {target_url} could not be configured: {e}",
             )
 
+def _resolve_protocol_options(url, model, api_mode=None, reasoning_effort=None):
+    try:
+        return protocol_options(url, model, api_mode, reasoning_effort)
+    except ValueError as exc:
+        raise _FallbackIneligibleHTTPException(400, str(exc)) from None
+
+
+def _responses_error(status, detail, *, eligible=False):
+    return 'event: error\ndata: ' + json.dumps({
+        "status": status, "text": detail, "fallback_eligible": eligible,
+    }) + '\n\n'
+
+
+def _responses_headers(url, headers):
+    # Legacy sessions can contain a JSON-encoded header dict.
+    if isinstance(headers, str):
+        try:
+            headers = json.loads(headers)
+        except ValueError:
+            raise _FallbackIneligibleHTTPException(400, "Invalid JSON request headers") from None
+    return _provider_headers(_detect_provider(url), headers)
+
+
+def _responses_request(url, model, messages, tools=None, **kwargs):
+    try:
+        target_url = responses_url(url)
+        sanitized = _sanitize_llm_messages(messages, preserve_responses=True)
+        for msg in sanitized:
+            origin = msg.get("_responses_origin")
+            if origin and origin != {"base_url": endpoint_base(url), "model": model}:
+                # Explicit fallbacks can change providers/models mid-run. Replay
+                # ordinary calls/results, never another route's encrypted state.
+                msg.pop("_responses_output", None)
+        payload = _build_responses_payload(
+            model, sanitized, tools, **kwargs,
+        )
+        return target_url, payload
+    except (ValueError, KeyError, TypeError) as exc:
+        raise _FallbackIneligibleHTTPException(400, str(exc)) from None
+
+
+def _validated_responses_data(data, url):
+    if not isinstance(data, dict):
+        raise _FallbackIneligibleHTTPException(502, "Responses response must be an object")
+    if data.get("error"):
+        err = data["error"]
+        status = _provider_stream_error_status(err, default=400)
+        detail = err.get("message", "Responses request failed") if isinstance(err, dict) else str(err)
+        raise _FallbackIneligibleHTTPException(status, detail)
+    try:
+        return normalize_response(data)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        # Never include raw output in exceptions: it may contain reasoning state.
+        raise _FallbackIneligibleHTTPException(502, f"Invalid Responses response: {exc}") from None
+
+
+def _responses_call(url, model, messages, headers, timeout, max_tokens, effort):
+    target, payload = _responses_request(url, model, messages, effort=effort, max_tokens=max_tokens)
+    try:
+        note_model_activity(target, model)
+        response = httpx_post_kimi_aware(target, _responses_headers(url, headers),
+                                        json=payload, timeout=_call_timeout(timeout))
+    except httpx.TransportError:
+        raise HTTPException(502, "Responses connection failed") from None
+    if not response.is_success:
+        raise _FallbackIneligibleHTTPException(response.status_code,
+                                               _format_upstream_error(response.status_code, response.text, target))
+    try:
+        data = response.json()
+    except ValueError:
+        raise _FallbackIneligibleHTTPException(502, "Invalid Responses JSON") from None
+    return _validated_responses_data(data, target).text
+
+
+async def _responses_call_async(url, model, messages, headers, timeout, max_tokens, effort,
+                                max_retries, workload, return_model_metadata):
+    target, payload = _responses_request(url, model, messages, effort=effort, max_tokens=max_tokens)
+    if _is_host_dead(target):
+        raise HTTPException(503, f"Upstream {_host_key(target)} marked unreachable (cooldown active)")
+    h = _responses_headers(url, headers)
+    for attempt in range(max(1, max_retries)):
+        try:
+            async with _local_model_slot(target, model, workload):
+                note_model_activity(target, model)
+                response = await httpx_post_kimi_aware_async(_get_http_client(), target, h,
+                                                            json=payload, timeout=_call_timeout(timeout))
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if not _mark_host_dead(target) and attempt + 1 < max_retries:
+                await asyncio.sleep(LLMConfig.RETRY_DELAY)
+                continue
+            raise HTTPException(503, f"Cannot reach {_host_key(target)}") from None
+        except httpx.TimeoutException:
+            raise _FallbackIneligibleHTTPException(504, "Responses request timed out") from None
+        except httpx.TransportError:
+            raise _FallbackIneligibleHTTPException(502, "Responses transport interrupted") from None
+        if not response.is_success:
+            if response.status_code in {429, 502, 503, 504} and attempt + 1 < max_retries:
+                await asyncio.sleep(LLMConfig.RETRY_DELAY)
+                continue
+            error_class = HTTPException if response.status_code in {429, 502, 503, 504} else _FallbackIneligibleHTTPException
+            raise error_class(response.status_code, _format_upstream_error(response.status_code, response.text, target))
+        _clear_host_dead(target)
+        try:
+            data = response.json()
+        except ValueError:
+            raise _FallbackIneligibleHTTPException(502, "Invalid Responses JSON") from None
+        result = _validated_responses_data(data, target)
+        actual_model = _reported_model_name(data.get("model")) or model
+        return (result.text, actual_model) if return_model_metadata else result.text
+
+
+async def _stream_responses(url, model, messages, headers, timeout, tools, max_tokens,
+                            effort, tool_choice_none):
+    try:
+        target, payload = _responses_request(url, model, messages, tools, effort=effort,
+                                              max_tokens=max_tokens, stream=True,
+                                              tool_choice_none=tool_choice_none)
+        h = _responses_headers(url, headers)
+    except HTTPException as exc:
+        yield _responses_error(exc.status_code, exc.detail)
+        return
+    if _is_host_dead(target):
+        yield _responses_error(503, f"Upstream {_host_key(target)} unreachable (cooldown active)", eligible=True)
+        return
+    state = ResponsesStream()
+    actual_model = ""
+    guard = _DegenerateStreamGuard(model)
+    try:
+        client = _get_http_client()
+        note_model_activity(target, model)
+        async with client.stream("POST", target, json=payload,
+                                 headers=h,
+                                 timeout=_stream_timeout(timeout)) as response:
+            if response.status_code != 200:
+                raw = (await response.aread()).decode(errors="replace")
+                yield _responses_error(response.status_code,
+                                       _format_upstream_error(response.status_code, raw, target),
+                                       eligible=response.status_code in {429, 502, 503, 504})
+                return
+            _clear_host_dead(target)
+            event_name = ""
+            async for line in response.aiter_lines():
+                if not line:
+                    event_name = ""
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if raw == "[DONE]":
+                    break  # Requires response.completed, not merely an SSE sentinel.
+                event = json.loads(raw)
+                event.setdefault("type", event_name)
+                kind = event["type"]
+                data = event.get("response") or {}
+                reported = _reported_model_name(data.get("model"))
+                if reported and reported != actual_model:
+                    actual_model = reported
+                    model_event = _model_actual_event(model, actual_model)
+                    if model_event:
+                        yield model_event
+                if kind in {"error", "response.failed", "response.cancelled"}:
+                    err = event.get("error") or data.get("error") or event
+                    status = _provider_stream_error_status(err, default=400)
+                    detail = err.get("message", "Responses request failed") if isinstance(err, dict) else str(err)
+                    yield _responses_error(status, detail, eligible=status in {429, 503})
+                    return
+                delta = state.feed(event)
+                if delta:
+                    error = guard.check(delta)
+                    if error:
+                        yield error
+                        return
+                    yield _stream_delta_event(delta)
+                if kind in {"response.completed", "response.incomplete"}:
+                    if kind == "response.incomplete":
+                        data = {**data, "status": "incomplete"}
+                    result = state.complete(data)
+                    if result.text and not state.text_seen:
+                        yield _stream_delta_event(result.text)
+                    if result.tool_calls:
+                        known = {tool["function"]["name"] for tool in tools or []}
+                        if any(call["name"] not in known for call in result.tool_calls):
+                            yield _responses_error(502, "Responses requested an unavailable function; tools were not executed")
+                            return
+                        yield 'data: ' + json.dumps({"type": "responses_context", "items": result.output_items,
+                                                     "origin": {"base_url": endpoint_base(url), "model": model}}) + '\n\n'
+                        yield 'data: ' + json.dumps({"type": "tool_calls", "calls": result.tool_calls}) + '\n\n'
+                    if isinstance(result.usage, dict):
+                        counts = _normalize_usage_counts(result.usage.get("input_tokens", 0), result.usage.get("output_tokens", 0))
+                        if counts:
+                            _annotate_usage_model(counts, model, actual_model)
+                            # Retain accounting details without including reasoning content.
+                            for key in ("input_tokens_details", "output_tokens_details", "total_tokens"):
+                                if key in result.usage:
+                                    counts[key] = result.usage[key]
+                            yield 'data: ' + json.dumps({"type": "usage", "data": counts}) + '\n\n'
+                    yield 'data: ' + json.dumps({"type": "finish", "reason": result.finish_reason}) + '\n\n'
+                    yield "data: [DONE]\n\n"
+                    return
+            yield _responses_error(502, "Responses stream interrupted before completion; tools were not executed")
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        _mark_host_dead(target)
+        yield _responses_error(503, f"Cannot reach {_host_key(target)}", eligible=True)
+    except httpx.TimeoutException:
+        yield _responses_error(504, "Responses stream timed out; tools were not executed")
+    except httpx.TransportError:
+        yield _responses_error(502, "Responses stream interrupted; tools were not executed")
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        yield _responses_error(502, f"Invalid Responses stream: {exc}")
+
+
 def _stream_target_url(url: str) -> str:
     provider = _detect_provider(url)
     if provider == "anthropic":
@@ -2560,10 +2804,20 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                     tool_choice_none: bool = False, workload: str = "foreground"):
-    target_url = _stream_target_url(url)
+                     tool_choice_none: bool = False, workload: str = "foreground",
+                     api_mode: Optional[str] = None, reasoning_effort: Optional[str] = None):
+    try:
+        api_mode, reasoning_effort = _resolve_protocol_options(url, model, api_mode, reasoning_effort)
+    except HTTPException as exc:
+        yield _responses_error(exc.status_code, exc.detail, eligible=False)
+        return
+    try:
+        target_url = responses_url(url) if api_mode == "responses" else _stream_target_url(url)
+    except ValueError as exc:
+        yield _responses_error(400, str(exc))
+        return
     async with _local_model_slot(target_url, model, workload):
-        async for chunk in _stream_llm_inner(
+        async with aclosing(_stream_llm_inner(
             url,
             model,
             messages,
@@ -2575,15 +2829,19 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tools=tools,
             session_id=session_id,
             tool_choice_none=tool_choice_none,
-        ):
-            yield chunk
+            api_mode=api_mode,
+            reasoning_effort=reasoning_effort,
+        )) as inner:
+            async for chunk in inner:
+                yield chunk
 
 
 async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+                            tool_choice_none: bool = False, api_mode: Optional[str] = None,
+                            reasoning_effort: Optional[str] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2592,7 +2850,20 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
       - event: error                       — errors
       - data: [DONE]                       — end of stream
     """
+    try:
+        api_mode, reasoning_effort = _resolve_protocol_options(url, model, api_mode, reasoning_effort)
+    except HTTPException as exc:
+        yield _responses_error(exc.status_code, exc.detail, eligible=False)
+        return
     provider = _detect_provider(url)
+    if api_mode == "responses" and provider != "chatgpt-subscription":
+        async with aclosing(_stream_responses(url, model, messages, headers, timeout, tools,
+                                             max_tokens, reasoning_effort, tool_choice_none)) as inner:
+            async for chunk in inner:
+                yield chunk
+        return
+    if url.rstrip("/").endswith("/responses") and provider != "chatgpt-subscription":
+        url = endpoint_base(url)
     messages_copy = _sanitize_llm_messages(messages)
 
     # Consolidate multiple system messages into one at the start.
@@ -2658,7 +2929,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload["think"] = False
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
-        _scrub_openai_chat_tool_reasoning(payload, target_url, model)
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        else:
+            _scrub_openai_chat_tool_reasoning(payload, target_url, model)
         h = _provider_headers(provider, headers)
         if provider == "copilot":
             from src.copilot import apply_request_headers

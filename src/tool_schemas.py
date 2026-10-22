@@ -1370,6 +1370,25 @@ def _repair_document_function_args(tool_type: str, arguments: str) -> Optional[d
 def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock]:
     """Convert a native function call into a ToolBlock for the existing execution pipeline."""
     tool_type = _TOOL_NAME_MAP.get(name, name)
+    # Some OpenAI-compatible providers return a custom MCP function name with
+    # the leading ``mcp__`` namespace removed (for example
+    # ``serverid__tool``). Restore it only when the live MCP inventory proves
+    # that the resulting qualified name exists; never turn an arbitrary unknown
+    # model-generated name into an executable MCP call.
+    if not tool_type.startswith("mcp__") and "__" in tool_type:
+        try:
+            from src.tool_utils import get_mcp_manager
+
+            mcp_manager = get_mcp_manager()
+            candidate = f"mcp__{tool_type}"
+            qualified_names = {
+                tool.get("qualified_name")
+                for tool in (mcp_manager.get_all_tools() if mcp_manager else [])
+            }
+            if candidate in qualified_names:
+                tool_type = candidate
+        except Exception as exc:
+            logger.debug("MCP function-name normalization skipped: %s", exc)
     try:
         if not arguments or (isinstance(arguments, str) and not arguments.strip()):
             args = {}

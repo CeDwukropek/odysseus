@@ -309,6 +309,34 @@ def capabilities_for_tool(tool_name: Any) -> ToolCapabilities:
             return capabilities
     if tool_name in _BROWSER_MCP_READ_TOOLS:
         return _BROWSER_MCP_READ_CAPABILITIES
+    if tool_name.startswith("mcp__"):
+        # Admin-registered MCP servers may explicitly declare read-only tools.
+        # Trust the hint only for an exact tool in the live manager inventory;
+        # unknown/stale/model-invented names continue to fail high below.
+        try:
+            from src.tool_utils import get_mcp_manager
+
+            manager = get_mcp_manager()
+            for tool in manager.get_all_tools() if manager else ():
+                if tool.get("qualified_name") != tool_name:
+                    continue
+                annotations = tool.get("annotations")
+                if annotations is None:
+                    break
+                if isinstance(annotations, dict):
+                    read_only = annotations.get("readOnlyHint")
+                    destructive = annotations.get("destructiveHint")
+                else:
+                    read_only = getattr(annotations, "readOnlyHint", None)
+                    destructive = getattr(annotations, "destructiveHint", None)
+                if read_only is True and destructive is not True:
+                    return _capabilities(
+                        ToolEffect.BROKERED_NETWORK_READ,
+                        result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+                    )
+                break
+        except Exception:
+            pass
     return _UNKNOWN_CAPABILITIES
 
 

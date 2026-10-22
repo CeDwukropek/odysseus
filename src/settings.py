@@ -36,6 +36,8 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
+    # Exact endpoint + model transport overrides; empty preserves all legacy routes.
+    "llm_protocol_overrides": [],
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a

@@ -1,5 +1,5 @@
 /**
- * Calendar Module — CalDAV-backed month/week/year calendar.
+ * Calendar Module — CalDAV-backed day/week/month/year calendar.
  */
 
 import uiModule from './ui.js';
@@ -146,7 +146,7 @@ async function _fetchEvents(start, end, force) {
 // Prefetch surrounding months in background — fire-and-forget, no blocking
 function _prefetchAdjacent() {
   const ranges = [];
-  if (_view === 'month' || _view === 'week') {
+  if (_view === 'month' || _view === 'week' || _view === 'day') {
     // Prefetch ±2 months around current
     for (let offset = -2; offset <= 2; offset++) {
       if (offset === 0) continue;
@@ -378,6 +378,15 @@ function _weekRange(d) {
   const s = new Date(d); s.setDate(d.getDate() - dow);
   const e = new Date(s); e.setDate(s.getDate() + 7);
   return [_ds(s), _ds(e)];
+}
+
+function _visibleRange() {
+  if (_view === 'year') {
+    return [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`];
+  }
+  if (_view === 'day') return _weekRange(_currentDate);
+  if (_view === 'week') return _weekRange(_currentDate);
+  return _monthRange(_currentDate);
 }
 
 function _eventsForDay(dateStr) {
@@ -781,10 +790,10 @@ function _updateDaySearchResults() {
   _wireQuickDelete(dayDetail);
 }
 
-// Step between calendar views by "zoom level" — pinch IN goes year→month→week,
+// Step between calendar views by "zoom level" — pinch IN goes year→month→week→day,
 // pinch OUT goes the other way. Agenda is its own thing so it's excluded.
 function _zoomView(direction) {
-  const chain = ['year', 'month', 'week'];
+  const chain = ['year', 'month', 'week', 'day'];
   const idx = chain.indexOf(_view);
   if (idx < 0) return;
   const next = idx + direction;
@@ -813,12 +822,12 @@ function _render() {
   // so we don't replace the whole calendar body when a query is active.
   // Force a selected day in month/week so the panel (and its search box)
   // is always available.
-  if (_searchQuery && (_view === 'month' || _view === 'week') && !_selectedDay) {
+  if (_searchQuery && (_view === 'month' || _view === 'week' || _view === 'day') && !_selectedDay) {
     _selectedDay = _today();
   }
   if (_view === 'agenda') _renderAgenda();
   else if (_view === 'year') _renderYear();
-  else if (_view === 'week') _renderWeek();
+  else if (_view === 'week' || _view === 'day') _renderWeek();
   else _renderMonth();
   // Prefetch adjacent in background after a short delay
   setTimeout(() => _prefetchAdjacent(), 200);
@@ -906,16 +915,21 @@ function _headerHTML() {
   const weekSuffix = _view === 'week'
     ? ` <span class="cal-week-no">W${_isoWeekNumber(_currentDate)}</span>`
     : '';
+  const title = _view === 'agenda'
+    ? 'Upcoming'
+    : _view === 'day'
+      ? _currentDate.toLocaleDateString([], { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' })
+      : MONTHS[_currentDate.getMonth()] + ' ' + _currentDate.getFullYear();
   return `<div class="cal-toolbar">
     <div class="cal-toolbar-nav">
-      <button class="cal-nav" id="cal-prev">&larr;</button>
+      <button class="cal-nav" id="cal-prev" aria-label="Previous ${_view}">&larr;</button>
       <button class="cal-nav cal-today-btn" id="cal-today">Today</button>
-      <span class="cal-title">${_view === 'agenda' ? 'Upcoming' : MONTHS[_currentDate.getMonth()] + ' ' + _currentDate.getFullYear()}${weekSuffix}</span>
-      <button class="cal-nav" id="cal-next">&rarr;</button>
+      <span class="cal-title">${title}${weekSuffix}</span>
+      <button class="cal-nav" id="cal-next" aria-label="Next ${_view}">&rarr;</button>
     </div>
     <div class="cal-toolbar-right">
       <div class="cal-view-toggle">
-        ${['week', 'month', 'year', 'agenda'].map(v =>
+        ${['day', 'week', 'month', 'year', 'agenda'].map(v =>
           `<button class="cal-view-btn${_view === v ? ' active' : ''}" data-view="${v}">${v[0].toUpperCase() + v.slice(1)}</button>`
         ).join('')}
       </div>
@@ -1177,16 +1191,16 @@ async function _renderMonth() {
 // renders preserve whatever scrollTop the user is on.
 const WEEK_HOUR_START = 0;
 const WEEK_HOUR_END   = 24;
-const WK_DEFAULT_SCROLL_HOUR = 7;
+const WK_DEFAULT_SCROLL_HOUR = 8;
 let _wkScrollY = null;       // remembered scroll position across renders
 let _wkScrolledOnce = false; // tracks the first auto-scroll-to-morning
 // pixel height per hour — user-zoomable, persisted in localStorage so the
 // preference sticks across reloads. Bounds keep the layout sane.
 const WK_PX_MIN = 28;
 const WK_PX_MAX = 120;
-const WK_PX_DEFAULT = 64;
+const WK_PX_DEFAULT = WK_PX_MIN;
 let WEEK_HOUR_PX = (() => {
-  const saved = parseInt(localStorage.getItem('cal-wk-hour-px') || '', 10);
+  const saved = parseInt(localStorage.getItem('cal-wk-hour-px-compact') || '', 10);
   return (saved >= WK_PX_MIN && saved <= WK_PX_MAX) ? saved : WK_PX_DEFAULT;
 })();
 function _wkSetZoom(px) {
@@ -1197,9 +1211,9 @@ function _wkSetZoom(px) {
   let _hourAtTop = null;
   if (wrap && WEEK_HOUR_PX) _hourAtTop = wrap.scrollTop / WEEK_HOUR_PX;
   WEEK_HOUR_PX = Math.max(WK_PX_MIN, Math.min(WK_PX_MAX, Math.round(px)));
-  try { localStorage.setItem('cal-wk-hour-px', String(WEEK_HOUR_PX)); } catch {}
+  try { localStorage.setItem('cal-wk-hour-px-compact', String(WEEK_HOUR_PX)); } catch {}
   if (_hourAtTop != null) _wkScrollY = Math.round(_hourAtTop * WEEK_HOUR_PX);
-  if (_view === 'week') _render();
+  if (_view === 'week' || _view === 'day') _render();
 }
 function _wkZoomBy(delta) { _wkSetZoom(WEEK_HOUR_PX + delta); }
 function _wkHours() { return WEEK_HOUR_END - WEEK_HOUR_START; }
@@ -1216,11 +1230,7 @@ function _wkMinToHHMM(mins) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 function _wkFormatHourLabel(h) {
-  const use12 = (new Date()).toLocaleString().toLowerCase().match(/am|pm/);
-  if (!use12) return `${String(h).padStart(2, '0')}:00`;
-  const ampm = h < 12 ? 'AM' : 'PM';
-  const hh = ((h + 11) % 12) + 1;
-  return `${hh} ${ampm}`;
+  return String(h);
 }
 function _wkEventTopHeight(ev, dayStr) {
   // Convert event start/end (local) into top/height in px relative to the
@@ -1252,6 +1262,66 @@ function _wkEventTopHeight(ev, dayStr) {
   return { top, height };
 }
 
+function _dayStripHTML() {
+  const [weekStart] = _weekRange(_currentDate);
+  const start = new Date(weekStart + 'T00:00:00');
+  const selected = _ds(_currentDate);
+  const today = _today();
+  let h = '<div class="cal-day-strip" role="group" aria-label="Choose a day">';
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start); d.setDate(start.getDate() + i);
+    const ds = _ds(d);
+    const weekdayIdx = _weekStartSun ? d.getDay() : (d.getDay() + 6) % 7;
+    const label = (_weekStartSun ? WEEKDAYS_SUN : WEEKDAYS)[weekdayIdx];
+    const eventCount = _eventsForDay(ds).length;
+    const cls = 'cal-day-strip-btn' + (ds === selected ? ' is-selected' : '') + (ds === today ? ' is-today' : '');
+    h += `<button class="${cls}" data-date="${ds}" aria-pressed="${ds === selected}" aria-label="${d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })}">
+      <span class="cal-day-strip-name">${label}</span>
+      <span class="cal-day-strip-num">${d.getDate()}</span>
+      <span class="cal-day-strip-dots" aria-hidden="true">${eventCount ? '<i></i>'.repeat(Math.min(3, eventCount)) : ''}</span>
+    </button>`;
+  }
+  return h + '</div>';
+}
+
+function _dayEventLayout(events, dayStr) {
+  // Collision layout shared by each day in the week and single-day timeline:
+  // overlapping events share the available width instead of hiding each other.
+  const ranges = events.map(ev => {
+    const startDate = _localDateOf(ev.dtstart);
+    const endDate = _localDateOf(ev.dtend || ev.dtstart);
+    const start = startDate < dayStr ? 0 : (_timeToMin(ev.dtstart) ?? 0);
+    const end = endDate > dayStr ? 24 * 60 : (_timeToMin(ev.dtend) ?? start + 60);
+    // Include the minimum rendered tile height in collision detection.
+    return { ev, start, end: Math.max(start + 18 * 60 / WEEK_HOUR_PX, end), lane: 0 };
+  }).sort((a, b) => a.start - b.start || a.end - b.end);
+
+  const result = new Map();
+  let group = [];
+  let groupEnd = -1;
+  const flush = () => {
+    if (!group.length) return;
+    const laneEnds = [];
+    for (const item of group) {
+      let lane = laneEnds.findIndex(end => end <= item.start);
+      if (lane < 0) lane = laneEnds.length;
+      laneEnds[lane] = item.end;
+      item.lane = lane;
+    }
+    const lanes = Math.max(1, laneEnds.length);
+    group.forEach(item => result.set(item.ev.uid, { lane: item.lane, lanes }));
+    group = [];
+  };
+  for (const item of ranges) {
+    if (group.length && item.start >= groupEnd) flush();
+    group.push(item);
+    groupEnd = Math.max(groupEnd, item.end);
+    if (group.length === 1) groupEnd = item.end;
+  }
+  flush();
+  return result;
+}
+
 async function _renderWeek() {
   const body = document.getElementById('cal-body');
   if (!body) return;
@@ -1260,15 +1330,16 @@ async function _renderWeek() {
   // etc. all rebuild the body).
   const _prevWrap = body.querySelector('.cal-wk-wrap');
   if (_prevWrap) _wkScrollY = _prevWrap.scrollTop;
+  const isDayView = _view === 'day';
   const [rs, re] = _weekRange(_currentDate);
   await _fetchEvents(rs, re);
   if (_isStaleRender(_tk)) return;
   const today = _today();
-  const ws = new Date(rs + 'T00:00:00');
+  const ws = new Date((isDayView ? _ds(_currentDate) : rs) + 'T00:00:00');
 
   // Build day list once (used for both all-day strip and grid).
   const days = [];
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < (isDayView ? 1 : 7); i++) {
     const d = new Date(ws); d.setDate(ws.getDate() + i);
     days.push({ d, ds: _ds(d), idx: i });
   }
@@ -1286,15 +1357,17 @@ async function _renderWeek() {
   railHtml += '</div>';
 
   // Day columns
-  let colsHtml = '<div class="cal-wk-cols">';
+  let colsHtml = `<div class="cal-wk-cols${isDayView ? ' cal-day-cols' : ''}">`;
   for (const { d, ds, idx } of days) {
     const isToday = ds === today;
     const allDayEvents = _eventsForDay(ds).filter(e => _eventVisible(e) && e.all_day);
     const timedEvents  = _eventsForDay(ds).filter(e => _eventVisible(e) && !e.all_day);
+    const dayLayout = _dayEventLayout(timedEvents, ds);
 
     const isSun = d.getDay() === 0;
+    const weekdayIdx = _weekStartSun ? d.getDay() : (d.getDay() + 6) % 7;
     colsHtml += `<div class="cal-wk-col${isToday ? ' cal-wk-today' : ''}${isSun && !_weekStartSun ? ' cal-wk-sun' : ''}" data-date="${ds}">`;
-    colsHtml += `<div class="cal-wk-col-head"><span class="cal-wk-dn">${(_weekStartSun ? WEEKDAYS_SUN : WEEKDAYS)[idx]}</span><span class="cal-wk-dt">${d.getDate()}</span></div>`;
+    colsHtml += `<div class="cal-wk-col-head"><span class="cal-wk-dn">${(_weekStartSun ? WEEKDAYS_SUN : WEEKDAYS)[weekdayIdx]}</span><span class="cal-wk-dt">${d.getDate()}</span></div>`;
     // All-day strip
     colsHtml += `<div class="cal-wk-allday">`;
     for (const ev of allDayEvents) {
@@ -1321,6 +1394,10 @@ async function _renderWeek() {
     for (const ev of timedEvents) {
       const { top, height } = _wkEventTopHeight(ev, ds);
       const t = _fmtTime(ev.dtstart) + '–' + _fmtTime(ev.dtend);
+      const layout = dayLayout?.get(ev.uid);
+      const laneDecl = layout && layout.lanes > 1
+        ? `left:calc(${100 * layout.lane / layout.lanes}% + 1px);right:auto;width:calc(${100 / layout.lanes}% - 2px);`
+        : '';
       // Custom-bg events get the image as the tile background; solid-color
       // events keep the original tinted treatment.
       let bgDecl;
@@ -1330,7 +1407,7 @@ async function _renderWeek() {
       } else {
         bgDecl = `background:color-mix(in srgb, ${_calColor(ev)} 18%, var(--bg));`;
       }
-      colsHtml += `<div class="cal-wk-block" data-uid="${_e(ev.uid)}" style="top:${top}px;height:${height}px;border-left-color:${_calColor(ev)};${bgDecl}">`;
+      colsHtml += `<div class="cal-wk-block" data-uid="${_e(ev.uid)}" style="top:${top}px;height:${height}px;border-left-color:${_calColor(ev)};${laneDecl}${bgDecl}">`;
       colsHtml += `<div class="cal-wk-block-name">${_e(ev.summary)}</div>`;
       colsHtml += `<div class="cal-wk-block-time">${t}</div>`;
       colsHtml += `<div class="cal-wk-block-resize" title="Drag to resize"></div>`;
@@ -1341,13 +1418,25 @@ async function _renderWeek() {
   colsHtml += '</div>';
 
   let h = _headerHTML() + _filtersRowHTML();
-  h += `<div class="cal-wk-wrap">${railHtml}${colsHtml}</div>`;
-  if (_selectedDay) h += _dayDetailHTML(_selectedDay);
+  if (isDayView) h += _dayStripHTML();
+  h += `<div class="cal-wk-wrap${isDayView ? ' cal-day-wrap' : ''}">${railHtml}${colsHtml}</div>`;
+  if (_selectedDay && !isDayView && _searchQuery) h += _dayDetailHTML(_selectedDay);
   // If the user grabbed the quick-add field mid-fetch, skip the swap (which
   // would destroy the focused input + drop the keyboard) and defer until blur.
   if (_qaTyping()) { _renderPending = true; return; }
   body.innerHTML = h;
   _wireAll(body);
+
+  body.querySelectorAll('.cal-day-strip-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = new Date(btn.dataset.date + 'T00:00:00');
+      if (isNaN(next.getTime())) return;
+      _currentDate = next;
+      _selectedDay = btn.dataset.date;
+      _slideDir = next < ws ? -1 : 1;
+      _render();
+    });
+  });
 
   // Single click (tap) an event block → open edit form. A drag-to-move or
   // drag-to-resize sets `justResized` in its mouseup so the trailing click
@@ -1611,7 +1700,7 @@ async function _renderWeek() {
   if (!body._wkZoomKeysWired) {
     body._wkZoomKeysWired = true;
     document.addEventListener('keydown', (e) => {
-      if (_view !== 'week') return;
+      if (_view !== 'week' && _view !== 'day') return;
       const tag = (document.activeElement?.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
       if (e.key === '+' || e.key === '=' ) { e.preventDefault(); _wkZoomBy(+12); }
@@ -2148,6 +2237,8 @@ function _wireAll(body) {
     let _sx = 0, _sy = 0, _t0 = 0, _tracking = false;
     body.addEventListener('touchstart', (e) => {
       if (!e.touches || e.touches.length !== 1) return;
+      // Let the all-day list scroll without switching the visible period.
+      if (e.target.closest('.cal-wk-allday')) { _tracking = false; return; }
       _sx = e.touches[0].clientX;
       _sy = e.touches[0].clientY;
       _t0 = Date.now();
@@ -2174,21 +2265,23 @@ function _wireAll(body) {
   document.getElementById('cal-prev')?.addEventListener('click', () => {
     _slideDir = -1;
     if (_view === 'year') _currentDate = new Date(_currentDate.getFullYear() - 1, 0, 1);
+    else if (_view === 'day') _currentDate.setDate(_currentDate.getDate() - 1);
     else if (_view === 'week') _currentDate.setDate(_currentDate.getDate() - 7);
     else if (_view === 'agenda') _currentDate.setDate(_currentDate.getDate() - 30);
     else _currentDate = new Date(_currentDate.getFullYear(), _currentDate.getMonth() - 1, 1);
     // Keep a day selected in month/week so the day-detail panel — which hosts
     // the search box — stays available (otherwise browsing hides search).
-    _selectedDay = (_view === 'month' || _view === 'week') ? _ds(_currentDate) : null;
+    _selectedDay = (_view === 'month' || _view === 'week' || _view === 'day') ? _ds(_currentDate) : null;
     _render();
   });
   document.getElementById('cal-next')?.addEventListener('click', () => {
     _slideDir = 1;
     if (_view === 'year') _currentDate = new Date(_currentDate.getFullYear() + 1, 0, 1);
+    else if (_view === 'day') _currentDate.setDate(_currentDate.getDate() + 1);
     else if (_view === 'week') _currentDate.setDate(_currentDate.getDate() + 7);
     else if (_view === 'agenda') _currentDate.setDate(_currentDate.getDate() + 30);
     else _currentDate = new Date(_currentDate.getFullYear(), _currentDate.getMonth() + 1, 1);
-    _selectedDay = (_view === 'month' || _view === 'week') ? _ds(_currentDate) : null;
+    _selectedDay = (_view === 'month' || _view === 'week' || _view === 'day') ? _ds(_currentDate) : null;
     _render();
   });
   document.getElementById('cal-today')?.addEventListener('click', () => { _currentDate = new Date(); _selectedDay = _today(); _render(); });
@@ -2210,9 +2303,7 @@ function _wireAll(body) {
     // Compute the visible range and force-refetch — _render() kicks off
     // a fetch internally but doesn't return a promise, so we await our
     // own one to actually serialize on the network.
-    const _range = (_view === 'year')
-      ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
-      : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
+    const _range = _visibleRange();
     const minSpin = new Promise(r => setTimeout(r, 700));
     try {
       await Promise.all([
@@ -2326,7 +2417,7 @@ function _wireAll(body) {
   body.querySelectorAll('.cal-view-btn').forEach(b => b.addEventListener('click', () => {
     _view = b.dataset.view;
     _searchQuery = '';
-    _selectedDay = null;
+    _selectedDay = _view === 'day' ? _ds(_currentDate) : null;
     // Switching to Agenda always lands on today so you see "what's coming
     // up" rather than wherever you happened to be browsing.
     if (_view === 'agenda') _currentDate = new Date();
@@ -3454,7 +3545,7 @@ let _wheelDebounce = 0;
 function _wheelNav(e) {
   if (!_open) return;
   // Don't intercept scroll inside the day-detail panel or any other inner scroll area
-  if (e.target.closest('.cal-day-detail') || e.target.closest('.cal-form')) return;
+  if (e.target.closest('.cal-day-detail') || e.target.closest('.cal-form') || e.target.closest('.cal-wk-wrap')) return;
   const body = document.getElementById('cal-body');
   if (!body) return;
   const now = Date.now();
@@ -3465,15 +3556,17 @@ function _wheelNav(e) {
   if (e.deltaY > 0) {
     _slideDir = 1;
     if (_view === 'year') _currentDate = new Date(_currentDate.getFullYear() + 1, 0, 1);
+    else if (_view === 'day') _currentDate.setDate(_currentDate.getDate() + 1);
     else if (_view === 'week') _currentDate.setDate(_currentDate.getDate() + 7);
     else _currentDate = new Date(_currentDate.getFullYear(), _currentDate.getMonth() + 1, 1);
   } else {
     _slideDir = -1;
     if (_view === 'year') _currentDate = new Date(_currentDate.getFullYear() - 1, 0, 1);
+    else if (_view === 'day') _currentDate.setDate(_currentDate.getDate() - 1);
     else if (_view === 'week') _currentDate.setDate(_currentDate.getDate() - 7);
     else _currentDate = new Date(_currentDate.getFullYear(), _currentDate.getMonth() - 1, 1);
   }
-  _selectedDay = null;
+  _selectedDay = (_view === 'day') ? _ds(_currentDate) : null;
   _render();
 }
 
@@ -3508,7 +3601,7 @@ function openCalendar() {
   });
   _currentDate = new Date();
   _selectedDay = _today();  // auto-show today's events on open
-  _view = 'month';
+  _view = window.innerWidth <= 768 ? 'week' : 'month';
   _scrollToTodayOnOpen = true;  // first render lands on today's row
   _escHandler = (e) => {
     if (e.key === 'Escape') {
@@ -3579,8 +3672,8 @@ async function openCalendarTo(target) {
     }
     if (dt && !isNaN(dt.getTime())) {
       _currentDate = new Date(dt);
-      _selectedDay = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
-      _view = 'month';
+      _selectedDay = _ds(new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()));
+      _view = window.innerWidth <= 768 ? 'day' : 'month';
       _render();
     }
   } catch (e) { /* best-effort focus */ }
@@ -3668,9 +3761,7 @@ function _loadCache() {
 window.addEventListener('calendar-refresh', () => {
   _allEvents = {};
   _fetchedRanges = [];
-  const range = (_view === 'year')
-    ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
-    : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
+  const range = _visibleRange();
   _fetchEvents(range[0], range[1], /*force*/ true)
     .then(() => { if (_open) _render(); _updateBadge(); })
     .catch(() => {});
@@ -3691,9 +3782,7 @@ document.addEventListener('visibilitychange', () => {
   if (now - _lastVisRefetchAt < _VIS_REFETCH_MIN_MS) return;
   _lastVisRefetchAt = now;
   _fetchedRanges = [];
-  const range = (_view === 'year')
-    ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
-    : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
+  const range = _visibleRange();
   _fetchEvents(range[0], range[1], /*force*/ true)
     .then(() => { if (_open) _render(); _updateBadge(); })
     .catch(() => {});
@@ -3706,9 +3795,7 @@ window.addEventListener('focus', () => {
   if (now - _lastVisRefetchAt < _VIS_REFETCH_MIN_MS) return;
   _lastVisRefetchAt = now;
   _fetchedRanges = [];
-  const range = (_view === 'year')
-    ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
-    : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
+  const range = _visibleRange();
   _fetchEvents(range[0], range[1], /*force*/ true)
     .then(() => { if (_open) _render(); _updateBadge(); })
     .catch(() => {});

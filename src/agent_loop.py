@@ -1422,7 +1422,10 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
         domains.add("notes_calendar_tasks")
-    if has(r"\b(calendar|event|meeting|appointment|schedule)\b"):
+    if has(
+        r"\b(calendar|events?|meetings?|appointments?|schedule|"
+        r"kalendarz\w*|spotka\w*|wydarze\w*|termin\w*)\b"
+    ):
         domains.add("notes_calendar_tasks")
     _code_write_intent = has(
         r"\b(?:python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
@@ -3002,6 +3005,8 @@ def _append_tool_results(
     round_num: int,
     round_reasoning: str = "",
     tool_result_records: Optional[list] = None,
+    response_items: Optional[list] = None,
+    response_origin: Optional[dict] = None,
 ):
     """Append tool execution results back into the message history for the next LLM round.
 
@@ -3051,6 +3056,10 @@ def _append_tool_results(
             }
             for j, tc in enumerate(native_tool_calls)
         ]
+        if response_items:
+            assistant_msg["_responses_output"] = response_items
+            if response_origin:
+                assistant_msg["_responses_origin"] = response_origin
         messages.append(assistant_msg)
         for j, tc in enumerate(native_tool_calls):
             result_text = tool_result_texts[j] if j < len(tool_result_texts) else ""
@@ -4773,6 +4782,8 @@ async def stream_agent_loop(
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
+        response_items = None  # opaque Responses replay, never browser/persistence prose
+        response_origin = None
         native_tool_calls = []  # populated if model uses function calling
 
         _active_route_state = {
@@ -5058,6 +5069,10 @@ async def stream_agent_loop(
                         # authorization decision.  Document UI events are built
                         # from the parsed ToolBlock only after successful dispatch.
                         continue
+                    elif data.get("type") == "responses_context":
+                        response_items = data.get("items")
+                        response_origin = data.get("origin")
+                        continue  # encrypted reasoning is internal transport state
                     elif data.get("type") == "tool_calls":
                         if _apply_candidate_compaction(candidate_index):
                             yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
@@ -6290,6 +6305,8 @@ async def stream_agent_loop(
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning,
+                             response_items=response_items,
+                             response_origin=response_origin,
                              tool_result_records=tool_result_records)
 
         # Emit agent_step event
