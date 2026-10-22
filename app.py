@@ -145,6 +145,7 @@ app.add_middleware(
         "Content-Type",
         "X-API-Key",
         "X-Auth-Token",
+        "X-Schedule-Context",
         "X-Odysseus-Internal-Token",
         "X-Odysseus-Owner",
         "X-Requested-With",
@@ -179,6 +180,7 @@ from starlette.responses import JSONResponse as _JSONResponse
 REQUEST_HARD_TIMEOUT = float(os.getenv("REQUEST_HARD_TIMEOUT", "45"))
 _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/chat",            # streaming
+    "/api/schedule/chat",   # native local tool loop, own 180s timeout
     "/api/shell/stream",    # SSE
     "/api/research",        # multi-minute jobs
     "/api/model/download",  # tmux setup may run pip installs
@@ -708,6 +710,10 @@ app.include_router(setup_chat_routes(
     skills_manager=skills_manager,
 ))
 
+# Native personal-schedule integration (request-scoped tools only)
+from routes.schedule_routes import setup_schedule_routes
+app.include_router(setup_schedule_routes(session_manager, chat_processor))
+
 # Research (background deep-research tasks)
 from routes.research.research_routes import setup_research_routes
 app.include_router(setup_research_routes(research_handler, session_manager=session_manager))
@@ -1229,6 +1235,12 @@ async def _startup_event():
                 await asyncio.sleep(3600)
 
     _startup_tasks.append(asyncio.create_task(_null_owner_sweep_loop()))
+
+    # Refresh linked wieikschedule plan mirrors; the calendar UI also syncs on open.
+    from routes.email_pollers import _inprocess_pollers_enabled
+    if _inprocess_pollers_enabled():
+        from src.wieik_calendar_sync import sync_loop as _wieik_calendar_sync_loop
+        _startup_tasks.append(asyncio.create_task(_wieik_calendar_sync_loop()))
 
     # Nightly skill audit — at ~02:00 local, test + judge a batch of the
     # least-recently-checked skills, auto-fixing/escalating weak ones (never

@@ -197,6 +197,7 @@ async function _fetchCalendars() {
   if (!_caldavSyncedOnce) {
     _caldavSyncedOnce = true;
     _syncCaldav(false);
+    if (_calendars.some(c => c.source === 'wieikschedule')) _syncWieik(false);
   }
 }
 
@@ -205,10 +206,14 @@ async function _fetchCalendars() {
 // no-op silently if CalDAV isn't configured.
 async function _syncCaldav(interactive) {
   try {
-    const res = await fetch(`${API_BASE}/api/calendar/sync`, {
+    const res = await fetch(`${API_BASE}/api/calendar/sync?direction=${interactive ? 'both' : 'pull'}`, {
       method: 'POST', credentials: 'same-origin',
     });
-    const data = await res.json().catch(() => ({}));
+    const raw = await res.json().catch(() => ({}));
+    const pulled = raw.pull || raw;
+    const data = { ...pulled, pushed: raw.push?.events || 0,
+      errors: [...(raw.push?.errors || []), ...(pulled.errors || [])] };
+    if (!res.ok) data.errors.push('Sync request failed: HTTP ' + res.status);
     if (interactive) return data;
     // Background path: if the pull actually changed anything, drop
     // local caches and re-render so new events appear.
@@ -224,8 +229,73 @@ async function _syncCaldav(interactive) {
   }
 }
 
+// Pull the wieikschedule plan mirror. Background calls re-render only when
+// the server applied changes; interactive calls return the result or error.
+async function _syncWieik(interactive) {
+  try {
+    const res = await fetch(`${API_BASE}/api/calendar/wieik/sync`, { method: 'POST', credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: data.detail || `HTTP ${res.status}` };
+    if (!interactive && data.changed) {
+      _allEvents = {}; _fetchedRanges = [];
+      try { localStorage.removeItem(LS_KEY); } catch (_) {}
+      _render();
+    }
+    return data;
+  } catch (e) {
+    return { error: e.message || 'Sync failed' };
+  }
+}
+
+// Server messages (e.g. the read-only plan mirror) are more useful than a status code.
+async function _responseError(r) {
+  const body = await r.json().catch(() => ({}));
+  return new Error((body && (body.detail || body.error)) || ('HTTP ' + r.status));
+}
+
+// Plan changes are applied in wieikschedule and pulled back; drop caches to show the result.
+function _reloadAfterPlanChange() {
+  _allEvents = {}; _fetchedRanges = [];
+  try { localStorage.removeItem(LS_KEY); } catch (_) {}
+  if (_open) _render();
+}
+
+async function _restoreWieik(uid) {
+  const res = await fetch(`${API_BASE}/api/calendar/wieik/restore`, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uid }),
+  });
+  if (!res.ok) throw await _responseError(res);
+  _reloadAfterPlanChange();
+}
+
+// While the calendar is open, pull plan changes made in wieikschedule every few minutes.
+let _wieikTimer = null;
+function _startWieikPolling() {
+  const linked = () => _calendars.some(c => c.source === 'wieikschedule');
+  if (linked()) { _syncWieik(false); _checkWieikProposals(); }
+  clearInterval(_wieikTimer);
+  _wieikTimer = setInterval(() => {
+    if (_open && !document.hidden && linked()) { _syncWieik(false); _checkWieikProposals(); }
+  }, 180000);
+}
+
+// Tell the user once about each new agent preview waiting for confirmation.
+const _seenWieikProposals = new Set();
+async function _checkWieikProposals() {
+  try {
+    const res = await fetch(`${API_BASE}/api/calendar/wieik/proposals`, { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const { proposals = [] } = await res.json();
+    const fresh = proposals.filter(p => !_seenWieikProposals.has(p.id));
+    fresh.forEach(p => _seenWieikProposals.add(p.id));
+    if (fresh.length) uiModule.showToast(`Agent proponuje ${fresh.length === 1 ? 'zmianę' : fresh.length + ' zmiany'} w planie zajęć — zatwierdź w ustawieniach kalendarza.`);
+  } catch (_) {}
+}
+function _stopWieikPolling() { clearInterval(_wieikTimer); _wieikTimer = null; }
+
 function _optimisticEvent(data, uid) {
-  const cal = _calendars.find(c => c.href === data.calendar_href) || _calendars[0];
+  const cal = _calendars.find(c => c.href === data.calendar_href) || _calendars.find(c => c.is_default) || _calendars[0];
   return {
     uid,
     summary: data.summary || '',
@@ -248,6 +318,12 @@ function _optimisticEvent(data, uid) {
 // resolved the promise and the optimistic state got promoted to truth.
 // All three flows now inspect `r.ok` and roll back the optimistic
 // state + surface a toast on the failure path.
+function _showPendingSync(result) {
+  if (result?.sync?.status === 'pending') {
+    uiModule.showToast(result.sync.message || 'Saved locally; remote sync is pending.');
+  }
+}
+
 async function _createEvent(data) {
   const tempUid = 'temp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   _allEvents[tempUid] = _optimisticEvent(data, tempUid);
@@ -258,6 +334,7 @@ async function _createEvent(data) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(d => {
+    _showPendingSync(d);
     if (d.uid) {
       delete _allEvents[tempUid];
       _allEvents[d.uid] = _optimisticEvent(data, d.uid);
@@ -284,9 +361,12 @@ async function _updateEvent(uid, data) {
   fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(uid)}`, {
     method: 'PUT', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
-  }).then(r => {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    if (isRecurring) {
+  }).then(async r => {
+    if (!r.ok) throw await _responseError(r);
+    _showPendingSync(await r.json());
+    if (_preMergeBackup?.plan) {
+      _reloadAfterPlanChange();
+    } else if (isRecurring) {
       _fetchedRanges = [];
       localStorage.removeItem(LS_KEY);
     } else {
@@ -334,13 +414,16 @@ async function _deleteEvent(uid, { scope = 'series' } = {}) {
   const scopeParam = deleteOccurrenceOnly ? '?scope=occurrence' : '';
   fetch(`${API_BASE}/api/calendar/events/${encodeURIComponent(uid)}${scopeParam}`, {
     method: 'DELETE', credentials: 'same-origin',
-  }).then(r => {
+  }).then(async r => {
     // 404 = the event was already deleted by another session/device. That's
     // exactly the state we want, so treat it as success — don't restore the
     // row, otherwise the user can never clear stale cached events that were
     // deleted from desktop while mobile was open (and vice versa).
-    if (!r.ok && r.status !== 404) throw new Error('HTTP ' + r.status);
-    if (isRecurring) {
+    if (!r.ok && r.status !== 404) throw await _responseError(r);
+    if (r.ok) _showPendingSync(await r.json());
+    if (Object.values(backups).some(ev => ev?.plan)) {
+      _reloadAfterPlanChange();
+    } else if (isRecurring) {
       _fetchedRanges = [];
       localStorage.removeItem(LS_KEY);
     } else {
@@ -495,7 +578,13 @@ async function _confirmAndDeleteEvent(ev) {
   if (!ev) return;
   const name = ev.summary ? `"${ev.summary}"` : 'this event';
   let scope = 'series';
-  if (_isRecurringEvent(ev)) {
+  if (ev.plan) {
+    const question = ev.plan.added
+      ? `Usunąć dopisane zajęcia ${name} z planu?`
+      : `Odwołać prywatnie ${name}? Zmiana trafi do wieikschedule; przywrócisz je w ustawieniach kalendarza.`;
+    const ok = await uiModule.styledConfirm(question, { confirmText: ev.plan.added ? 'Usuń dopisek' : 'Odwołaj', danger: true });
+    if (!ok) return;
+  } else if (_isRecurringEvent(ev)) {
     scope = await _chooseRecurringDeleteScope(ev);
     if (!scope) return;
   } else {
@@ -934,7 +1023,7 @@ function _headerHTML() {
         ).join('')}
       </div>
       <button class="cal-nav" id="cal-settings" title="Calendar settings" style="position:relative;top:-3px;"><svg width="13" height="13" style="position:relative;top:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.68 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
-      <button class="cal-nav${window._calSyncing ? ' cal-syncing' : ''}${window._calSyncDone ? ' cal-sync-done' : ''}" id="cal-sync" title="Refresh from database" style="position:relative;top:-3px;">${window._calSyncDone ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>'}</button>
+      <button class="cal-nav${window._calSyncing ? ' cal-syncing' : ''}${window._calSyncDone ? ' cal-sync-done' : ''}" id="cal-sync" title="Synchronize calendars" style="position:relative;top:-3px;">${window._calSyncDone ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>'}</button>
       ${_filtersToggleHTML()}
       <button class="cal-add-btn cal-add-btn-text" id="cal-add" title="New event"><span class="cal-add-plus">+</span><span class="cal-add-label">New</span></button>
     </div>
@@ -2305,7 +2394,23 @@ function _wireAll(body) {
     // own one to actually serialize on the network.
     const _range = _visibleRange();
     const minSpin = new Promise(r => setTimeout(r, 700));
+    let syncFailed = false;
     try {
+      if (_calendars.some(c => c.source === 'caldav')) {
+        const result = await _syncCaldav(true);
+        if (result?.errors?.length) {
+          syncFailed = true;
+          uiModule.showError('Calendar sync: ' + result.errors[0]);
+        }
+        await _fetchCalendars();
+      }
+      if (_calendars.some(c => c.source === 'wieikschedule')) {
+        const result = await _syncWieik(true);
+        if (result?.error) {
+          syncFailed = true;
+          uiModule.showError('Plan zajęć: ' + result.error);
+        }
+      }
       await Promise.all([
         _fetchEvents(_range[0], _range[1], /*force*/ true).catch(() => {}),
         minSpin,
@@ -2316,13 +2421,13 @@ function _wireAll(body) {
       // template reads (not a one-off innerHTML on the button), so a stray
       // _render() — the calendar re-renders mid-flow — can't wipe it. Same
       // reason the spin is flag-driven.
-      window._calSyncDone = true;
+      window._calSyncDone = !syncFailed;
       _render();
       setTimeout(() => {
         window._calSyncDone = false;
         if (_open) _render();
       }, 900);
-      if (uiModule?.showToast) uiModule.showToast('Calendar refreshed');
+      if (!syncFailed && uiModule?.showToast) uiModule.showToast('Calendar synchronized');
     }
   });
   // Brief spin on the "+" glyph before the new-event form opens. The
@@ -2596,6 +2701,145 @@ if (typeof window !== 'undefined' && !window._calUndoBound) {
 
 // ── Calendar Settings ──
 
+// Settings block for the wieikschedule plan mirror: pair with a one-time code,
+// show freshness, refresh or disconnect (which also revokes the link token).
+async function _renderWieikSection(overlay, cleanup) {
+  const box = overlay.querySelector('#cal-wieik-section');
+  if (!box) return;
+  const reopen = async () => {
+    _allEvents = {}; _fetchedRanges = [];
+    try { localStorage.removeItem(LS_KEY); } catch (_) {}
+    await _fetchCalendars();
+    _render();
+    cleanup();
+    _showCalSettings();
+  };
+  const fail = async (res) => { const d = await res.json().catch(() => ({})); throw new Error(d.detail || `HTTP ${res.status}`); };
+  let st;
+  try {
+    const res = await fetch(`${API_BASE}/api/calendar/wieik`, { credentials: 'same-origin' });
+    if (!res.ok) await fail(res);
+    st = await res.json();
+  } catch (err) {
+    box.textContent = `Nie udało się odczytać stanu: ${err.message}`;
+    return;
+  }
+  const btn = 'font-size:12px;padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--panel);color:var(--fg);cursor:pointer;';
+  if (!st.linked) {
+    box.innerHTML = `
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        <input id="cal-wieik-code" autocomplete="off" placeholder="XXXX-XXXX-XXXX" maxlength="20" style="font-size:12px;padding:3px 6px;border-radius:4px;border:1px solid var(--border);background:var(--panel);color:var(--fg);font-family:monospace;">
+        <button id="cal-wieik-pair" type="button" style="${btn}">Połącz</button>
+        <span id="cal-wieik-status" style="font-size:11px;opacity:0.7;"></span>
+      </div>
+      <div style="font-size:10px;opacity:0.4;margin-top:4px;">Wygeneruj kod w wieikschedule (Opcje → Kalendarz w Odysseusie). Plan pojawi się jako kalendarz „Plan zajęć” tylko do odczytu; zajęcia zmieniasz w wieikschedule.</div>`;
+    box.querySelector('#cal-wieik-pair').addEventListener('click', async (e) => {
+      const status = box.querySelector('#cal-wieik-status');
+      const button = e.currentTarget;
+    button.disabled = true;
+      status.textContent = 'Łączenie…';
+      try {
+        const res = await fetch(`${API_BASE}/api/calendar/wieik/pair`, {
+          method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: box.querySelector('#cal-wieik-code').value.trim() }),
+        });
+        if (!res.ok) await fail(res);
+        await reopen();
+      } catch (err) {
+        status.textContent = err.message;
+        button.disabled = false;
+      }
+    });
+    return;
+  }
+  const when = (v) => v ? new Date(v).toLocaleString() : 'nigdy';
+  box.innerHTML = `
+    <div>${_e(st.label)} — ${_e(st.faculty)}${st.group_set_name ? `, ${_e(st.group_set_name)}` : ''}</div>
+    <div style="font-size:11px;opacity:0.6;margin-top:2px;">Ostatnia synchronizacja: ${_e(when(st.last_success_at))}</div>
+    ${st.last_error ? `<div style="font-size:11px;color:var(--red);margin-top:2px;">${_e(st.last_error)}</div>` : ''}
+    ${st.stale && !st.last_error ? `<div style="font-size:11px;opacity:0.7;margin-top:2px;">Plan może być nieaktualny.</div>` : ''}
+    <div id="cal-wieik-proposals" style="margin-top:6px;"></div>
+    <div id="cal-wieik-cancelled" style="margin-top:6px;"></div>
+    <div id="cal-wieik-actions" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px;">
+      <button id="cal-wieik-sync" type="button" style="${btn}">Odśwież teraz</button>
+      <button id="cal-wieik-disconnect" type="button" style="${btn}">Rozłącz</button>
+      <span id="cal-wieik-status" style="font-size:11px;opacity:0.7;"></span>
+    </div>`;
+  const status = box.querySelector('#cal-wieik-status');
+  fetch(`${API_BASE}/api/calendar/wieik/proposals`, { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : { proposals: [] })
+    .then(({ proposals = [] }) => {
+      const list = box.querySelector('#cal-wieik-proposals');
+      if (!list || !proposals.length) return;
+      list.innerHTML = `<div style="font-size:11px;opacity:0.8;font-weight:600;">Do zatwierdzenia (propozycje agenta):</div>` + proposals.map(p => `
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11px;margin-top:3px;">
+          <span>${_e(p.subject || '')}: ${_e(p.summary)}${p.reason ? ` — ${_e(p.reason)}` : ''}</span>
+          <button type="button" class="cal-wieik-confirm" data-id="${_e(p.id)}" style="${btn}font-size:11px;padding:1px 6px;">Zatwierdź</button>
+          <button type="button" class="cal-wieik-reject" data-id="${_e(p.id)}" style="${btn}font-size:11px;padding:1px 6px;">Odrzuć</button>
+        </div>`).join('');
+      const act = (selector, path) => list.querySelectorAll(selector).forEach(b => b.addEventListener('click', async () => {
+        list.querySelectorAll('button').forEach(x => { x.disabled = true; });
+        try {
+          const res = await fetch(`${API_BASE}/api/calendar/wieik/proposals/${encodeURIComponent(b.dataset.id)}/${path}`, { method: 'POST', credentials: 'same-origin' });
+          if (!res.ok) throw await _responseError(res);
+          if (path === 'confirm') { _reloadAfterPlanChange(); uiModule.showToast('Zmiana zatwierdzona w planie zajęć'); }
+          await reopen();
+        } catch (err) {
+          status.textContent = err.message;
+          list.querySelectorAll('button').forEach(x => { x.disabled = false; });
+        }
+      }));
+      act('.cal-wieik-confirm', 'confirm');
+      act('.cal-wieik-reject', 'reject');
+    }).catch(() => {});
+  fetch(`${API_BASE}/api/calendar/wieik/cancelled`, { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : { events: [] })
+    .then(({ events = [] }) => {
+      const list = box.querySelector('#cal-wieik-cancelled');
+      if (!list || !events.length) return;
+      list.innerHTML = `<div style="font-size:11px;opacity:0.6;">Odwołane prywatnie:</div>` + events.map(ev => `
+        <div style="display:flex;gap:6px;align-items:center;font-size:11px;margin-top:2px;">
+          <span>${_e(new Date(ev.dtstart).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }))} — ${_e(ev.summary)}</span>
+          <button type="button" class="cal-wieik-restore" data-uid="${_e(ev.uid)}" style="${btn}font-size:11px;padding:1px 6px;">Przywróć</button>
+        </div>`).join('');
+      list.querySelectorAll('.cal-wieik-restore').forEach(b => b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await _restoreWieik(b.dataset.uid); await reopen(); }
+        catch (err) { status.textContent = err.message; b.disabled = false; }
+      }));
+    }).catch(() => {});
+  box.querySelector('#cal-wieik-sync').addEventListener('click', async (e) => {
+    const button = e.currentTarget;
+    button.disabled = true;
+    status.textContent = 'Synchronizacja…';
+    const result = await _syncWieik(true);
+    if (result.error) { status.textContent = result.error; button.disabled = false; return; }
+    await reopen();
+  });
+  box.querySelector('#cal-wieik-disconnect').addEventListener('click', () => {
+    const actions = box.querySelector('#cal-wieik-actions');
+    actions.innerHTML = `<span style="font-size:11px;">Usunąć kalendarz planu z Odysseusa i odwołać połączenie?</span>
+      <button id="cal-wieik-confirm" type="button" style="${btn}color:var(--red);">Tak, rozłącz</button>
+      <button id="cal-wieik-cancel" type="button" style="${btn}">Anuluj</button>
+      <span id="cal-wieik-status" style="font-size:11px;opacity:0.7;"></span>`;
+    actions.querySelector('#cal-wieik-cancel').addEventListener('click', () => _renderWieikSection(overlay, cleanup));
+    actions.querySelector('#cal-wieik-confirm').addEventListener('click', async (e) => {
+      const button = e.currentTarget;
+    button.disabled = true;
+      try {
+        const res = await fetch(`${API_BASE}/api/calendar/wieik`, { method: 'DELETE', credentials: 'same-origin' });
+        if (!res.ok) await fail(res);
+        const data = await res.json();
+        if (!data.revoked) uiModule.showError('Kalendarz usunięty, ale nie udało się odwołać połączenia. Odwołaj je w wieikschedule.');
+        await reopen();
+      } catch (err) {
+        actions.querySelector('#cal-wieik-status').textContent = err.message;
+        button.disabled = false;
+      }
+    });
+  });
+}
+
 async function _showCalSettings() {
   const existing = document.getElementById('cal-settings-panel');
   if (existing) { existing.remove(); return; }
@@ -2615,6 +2859,14 @@ async function _showCalSettings() {
         <button class="close-btn" id="cal-settings-close">\u2716</button>
       </div>
       <div class="modal-body" style="padding:16px;display:flex;flex-direction:column;gap:16px;">
+        <div>
+          <label for="cal-settings-default">Default calendar for new events</label>
+          <select id="cal-settings-default" class="cal-input">
+            <option value="">Automatic (first available calendar)</option>
+            ${cals.map(c => `<option value="${_e(c.href)}" ${c.is_default ? 'selected' : ''}>${_e(c.name)}</option>`).join('')}
+          </select>
+          <div style="font-size:11px;opacity:0.6;">Used by the agent and event form when no calendar is specified.</div>
+        </div>
         <div>
           <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Your calendars</div>
           <div id="cal-settings-list" style="display:flex;flex-direction:column;gap:4px;">
@@ -2661,6 +2913,10 @@ async function _showCalSettings() {
             <button id="cal-wstart-mon" type="button" style="font-size:12px;padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:${!_weekStartSun ? 'color-mix(in srgb, var(--accent,var(--red)) 18%, var(--panel))' : 'var(--panel)'};color:var(--fg);cursor:pointer;transition:background 0.1s,border-color 0.1s;outline:none;">Monday</button>
             <button id="cal-wstart-sun" type="button" style="font-size:12px;padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:${_weekStartSun ? 'color-mix(in srgb, var(--accent,var(--red)) 18%, var(--panel))' : 'var(--panel)'};color:var(--fg);cursor:pointer;transition:background 0.1s,border-color 0.1s;outline:none;">Sunday</button>
           </div>
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:12px;">
+          <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Plan zajęć wieikschedule</div>
+          <div id="cal-wieik-section" style="font-size:12px;">Ładowanie…</div>
         </div>
         <div style="border-top:1px solid var(--border);padding-top:12px;">
           <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Sync</div>
@@ -2819,6 +3075,22 @@ async function _showCalSettings() {
 
   // Sync now — fires the CalDAV pull synchronously so we can show the
   // result inline, then refreshes the panel + calendar grid.
+  overlay.querySelector('#cal-settings-default')?.addEventListener('change', async (event) => {
+    const select = event.currentTarget;
+    select.disabled = true;
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/default-calendar`, {
+        method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calendar_href: select.value || null })
+      });
+      if (!res.ok) throw new Error('Could not save default calendar');
+      await _fetchCalendars();
+      uiModule.showToast('Default calendar saved');
+    } catch (error) { uiModule.showError(error.message); }
+    finally { select.disabled = false; }
+  });
+
   overlay.querySelector('#cal-settings-sync-now')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const status = overlay.querySelector('#cal-settings-sync-status');
@@ -2830,6 +3102,7 @@ async function _showCalSettings() {
     } else {
       const parts = [];
       if (data.events) parts.push(`${data.events} events`);
+      if (data.pushed) parts.push(`${data.pushed} uploaded`);
       if (data.deleted) parts.push(`${data.deleted} removed`);
       status.textContent = parts.length ? `Synced — ${parts.join(', ')}` : 'Synced — no changes';
       _allEvents = {}; _fetchedRanges = [];
@@ -2843,6 +3116,8 @@ async function _showCalSettings() {
     }
     btn.disabled = false;
   });
+
+  _renderWieikSection(overlay, cleanup);
 
   // Integrations link — close this overlay and open Settings → Integrations.
   overlay.querySelector('#cal-settings-open-caldav')?.addEventListener('click', (e) => {
@@ -2897,8 +3172,8 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
   // Default to all-day when dragging across multiple days
   const ad = existing ? existing.all_day : (defaultEndDate && defaultEndDate !== defaultDate);
 
-  let calOpts = _calendars.filter(c => !_hiddenCals.has(c.href)).map(c =>
-    `<option value="${_e(c.href)}" ${existing && existing.calendar_href === c.href ? 'selected' : ''}>${_e(c.name)}</option>`
+  let calOpts = _calendars.filter(c => !_hiddenCals.has(c.href) || c.is_default || existing?.calendar_href === c.href).map(c =>
+    `<option value="${_e(c.href)}" ${(existing ? existing.calendar_href === c.href : c.is_default) ? 'selected' : ''}>${_e(c.name)}</option>`
   ).join('');
 
   // "Bespoke" event form: a big clock-face hero (time + date) and a single
@@ -3020,7 +3295,9 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
       ${_calendars.length > 1 ? `<select id="cal-f-cal" class="cal-input cal-f-cal-select">${calOpts}</select>` : ''}
     </div>
 
+    ${existing?.plan ? `<div class="cal-plan-note" style="font-size:11px;opacity:0.7;margin:6px 0;">Plan zajęć z wieikschedule — zmiana terminu, długości lub sali zapisze się tam jako Twoja prywatna zmiana.${existing.plan.modified ? ' Termin jest już zmieniony prywatnie.' : ''}</div>` : ''}
     <div class="cal-form-actions">
+      ${existing?.plan?.modified ? `<button id="cal-f-restore" class="cal-btn" style="display:inline-flex;align-items:center;gap:5px;">Przywróć termin</button>` : ''}
       ${isEdit ? `<button id="cal-f-del" class="cal-btn cal-btn-danger" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>Delete</button>` : ''}
       <button id="cal-f-cancel" class="cal-btn" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Cancel</button>
       <button id="cal-f-save" class="cal-btn cal-btn-primary" style="display:inline-flex;align-items:center;gap:5px;">${isEdit
@@ -3272,7 +3549,7 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
       description: document.getElementById('cal-f-desc').value,
       location: document.getElementById('cal-f-loc').value,
       rrule: document.getElementById('cal-f-rrule').value || '',
-      calendar_href: document.getElementById('cal-f-cal')?.value || (_calendars[0]?.href || ''),
+      calendar_href: document.getElementById('cal-f-cal')?.value || (_calendars.find(c => c.is_default)?.href || _calendars[0]?.href || ''),
       color: colorVal || undefined,
     };
     try {
@@ -3298,6 +3575,21 @@ function _showEventForm(existing, defaultDate, defaultEndDate) {
   });
   document.getElementById('cal-f-del')?.addEventListener('click', async () => {
     await _confirmAndDeleteEvent(existing);
+  });
+  if (existing?.plan) {
+    // Title, description, recurrence and calendar come from wieikschedule.
+    ['cal-f-sum', 'cal-f-desc', 'cal-f-rrule', 'cal-f-allday', 'cal-f-cal'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = true;
+    });
+    const del = document.getElementById('cal-f-del');
+    if (del) del.lastChild.textContent = existing.plan.added ? 'Usuń dopisek' : 'Odwołaj';
+  }
+  document.getElementById('cal-f-restore')?.addEventListener('click', async (e) => {
+    const button = e.currentTarget;
+    button.disabled = true;
+    try { await _restoreWieik(existing.uid); uiModule.showToast('Przywrócono oryginalny termin'); }
+    catch (err) { uiModule.showError(err.message); button.disabled = false; }
   });
   // ── Bespoke-form behavior ──────────────────────────────────────────
   const formEl = body.querySelector('.cal-form');
@@ -3576,9 +3868,11 @@ function openCalendar() {
   if (Modals.isMinimized('calendar-modal')) {
     Modals.restore('calendar-modal');
     _open = true;
+    _startWieikPolling();
     return;
   }
   _open = true;
+  _startWieikPolling();
   if (_todayCount() > 0) { _markBadgeSeen(); _updateBadge(); }
   _collapseSidebar();
   const modal = _getModal();
@@ -3683,6 +3977,7 @@ let _highlightEventUid = null;
 
 function _doCloseCalendar() {
   _open = false;
+  _stopWieikPolling();
   _restoreSidebar();
   if (_modal) {
     _modal.style.display = 'none';

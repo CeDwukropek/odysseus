@@ -3355,6 +3355,9 @@ async function initIntegrations() {
 
 /* ══ Unified Integrations ══ */
 
+// Chat tokens created for the wieikschedule app are recognised by their name.
+function _isWieikToken(tok) { return String(tok?.name || '').toLowerCase().startsWith('wieikschedule'); }
+
 const INTG_TYPES = {
   api:     { label: 'API',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>' },
   caldav:  { label: 'CalDAV',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>' },
@@ -3364,6 +3367,7 @@ const INTG_TYPES = {
   mcp:     { label: 'MCP',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>' },
   codex:   { label: 'Codex',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 10.696.453a6.023 6.023 0 0 0-5.75 4.172 6.061 6.061 0 0 0-3.946 2.945 6.024 6.024 0 0 0 .742 7.099 5.98 5.98 0 0 0 .516 4.911 6.046 6.046 0 0 0 6.51 2.9A5.996 5.996 0 0 0 13.26 23.547a6.023 6.023 0 0 0 5.75-4.172 6.061 6.061 0 0 0 3.946-2.945 6.024 6.024 0 0 0-.674-6.609zM13.26 21.047a4.508 4.508 0 0 1-2.886-1.041l.143-.082 4.793-2.769a.777.777 0 0 0 .391-.676V10.34l2.026 1.17a.072.072 0 0 1 .039.061v5.596a4.532 4.532 0 0 1-4.506 4.48zM3.968 17.64a4.473 4.473 0 0 1-.537-3.018l.143.086 4.793 2.769a.79.79 0 0 0 .782 0l5.852-3.379v2.34a.072.072 0 0 1-.029.062l-4.845 2.796a4.532 4.532 0 0 1-6.159-1.656zM2.804 7.922a4.49 4.49 0 0 1 2.348-1.973V11.6a.778.778 0 0 0 .391.676l5.852 3.378-2.026 1.17a.072.072 0 0 1-.068 0L4.456 14.03a4.532 4.532 0 0 1-1.652-6.108zm16.423 3.823L13.375 8.367l2.026-1.17a.072.072 0 0 1 .068 0l4.845 2.796a4.525 4.525 0 0 1-.7 8.08V12.42a.778.778 0 0 0-.387-.676zm2.015-3.025l-.143-.086-4.793-2.769a.79.79 0 0 0-.782 0L9.672 9.243V6.903a.072.072 0 0 1 .029-.062l4.845-2.796a4.525 4.525 0 0 1 6.696 4.675zM8.598 12.66L6.57 11.49a.072.072 0 0 1-.039-.061V5.833a4.525 4.525 0 0 1 7.413-3.48l-.143.082-4.793 2.769a.777.777 0 0 0-.391.676l-.019 6.78zm1.1-2.379l2.607-1.505 2.607 1.505v3.01l-2.607 1.505-2.607-1.505z"/></svg>' },
   claude:  { label: 'Claude',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>' },
+  wieik:   { label: 'Plan',    icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><polyline points="9 16 11 18 15 14"/></svg>' },
   vault:   { label: 'Vault',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' },
 };
 
@@ -3457,7 +3461,7 @@ async function initUnifiedIntegrations() {
   }
 
   async function fetchAll() {
-    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, tokenRes, calendarsRes] = await Promise.all([
+    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, tokenRes, calendarsRes, wieikRes] = await Promise.all([
       fetch('/api/auth/integrations', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { integrations: [] }).catch(() => ({ integrations: [] })),
       fetch('/api/calendar/config/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
       fetch('/api/contacts/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
@@ -3467,6 +3471,7 @@ async function initUnifiedIntegrations() {
       fetch('/api/vault/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
       fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
       fetch('/api/calendar/calendars', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { calendars: [] }).catch(() => ({ calendars: [] })),
+      fetch('/api/calendar/wieik', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { linked: false }).catch(() => ({ linked: false })),
     ]);
     const items = [];
     // API integrations
@@ -3524,6 +3529,14 @@ async function initUnifiedIntegrations() {
       if (!agentType) continue;
       const detail = `${tok.token_prefix || 'token'}... - ${scopes.join(', ') || 'chat'}`;
       items.push({ type: agentType, id: tok.id, name: tok.name || (agentType === 'claude' ? 'Claude Agent' : 'Codex Agent'), detail, enabled: true, data: tok });
+    }
+    // wieikschedule: the plan mirror and the chat tokens the app uses, shown as one integration.
+    const wieikTokens = (Array.isArray(tokenRes) ? tokenRes : []).filter(_isWieikToken);
+    if (wieikRes.linked || wieikTokens.length) {
+      const parts = [];
+      if (wieikRes.linked) parts.push(`Kalendarz: ${wieikRes.faculty || 'połączony'}${wieikRes.last_error ? ' (błąd synchronizacji)' : ''}`);
+      if (wieikTokens.length) parts.push(`Token czatu: ${wieikTokens.map(t => (t.token_prefix || 'ody') + '…').join(', ')}`);
+      items.push({ type: 'wieik', id: '__wieik__', name: 'Plan zajęć (wieikschedule)', detail: parts.join(' · '), enabled: !wieikRes.last_error, data: { status: wieikRes, tokens: wieikTokens } });
     }
     // Vaultwarden removed as an integration option.
     return items;
@@ -3600,6 +3613,12 @@ async function initUnifiedIntegrations() {
           else if (type === 'email') await fetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'mcp') await fetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'codex' || type === 'claude') await fetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'wieik') {
+            // Disconnect the plan calendar (revokes its link) and revoke the app's chat tokens.
+            await fetch('/api/calendar/wieik', { method: 'DELETE', credentials: 'same-origin' });
+            const tokens = await fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []);
+            for (const tok of tokens.filter(_isWieikToken)) await fetch(`/api/tokens/${tok.id}`, { method: 'DELETE', credentials: 'same-origin' });
+          }
           else if (type === 'vault') await fetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
         } catch (_) {}
         formEl.style.display = 'none';
@@ -3619,6 +3638,7 @@ async function initUnifiedIntegrations() {
     else if (type === 'codex') showAgentForm('codex', editId);
     else if (type === 'claude') showAgentForm('claude', editId);
     else if (type === 'vault') showVaultForm();
+    else if (type === 'wieik') showWieikForm();
   }
 
   // ── API form ──
@@ -3821,6 +3841,136 @@ async function initUnifiedIntegrations() {
           el('uf-api-msg').style.color = 'var(--red)';
         }
       } catch (e) { el('uf-api-msg').textContent = 'Error: ' + e.message; el('uf-api-msg').style.color = 'var(--red)'; }
+    });
+  }
+
+  // ── Plan zajęć (wieikschedule): chat token for the app + the plan calendar link ──
+  async function showWieikForm() {
+    const btn = 'display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));';
+    const when = v => v ? new Date(v).toLocaleString() : 'jeszcze nie';
+    const [status, tokens] = await Promise.all([
+      fetch('/api/calendar/wieik', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { linked: false }).catch(() => ({ linked: false })),
+      fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
+    ]);
+    const own = (Array.isArray(tokens) ? tokens : []).filter(_isWieikToken);
+    formEl.innerHTML = `
+      <div class="admin-card" style="margin-top:8px">
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><span style="display:inline-flex;color:var(--accent, var(--red));">${INTG_TYPES.wieik.icon}</span>Plan zajęć (wieikschedule)</h2>
+        <div class="settings-col">
+          <div style="font-size:12px;font-weight:600;margin-top:4px;">1. Asystent planu w wieikschedule</div>
+          <div style="font-size:11px;opacity:0.7;">Token pozwala aplikacji wieikschedule rozmawiać z agentem planu na tym koncie Odysseusa (modele, historia, opcjonalnie pamięć). Ma wyłącznie uprawnienie <b>chat</b>.</div>
+          <div id="uf-wieik-tokens" style="font-size:11px;">${own.length ? own.map(t => `
+            <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+              <span style="flex:1">${esc(t.name || 'wieikschedule')} · ${esc(t.token_prefix || 'ody')}…</span>
+              <button class="admin-btn-add uf-wieik-revoke" data-token-id="${esc(t.id)}" style="${btn}">Unieważnij</button>
+            </div>`).join('') : '<span style="opacity:0.6">Brak tokenu.</span>'}</div>
+          <div id="uf-wieik-reveal" style="display:none;font-size:11px;border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:6px;">
+            <div>Skopiuj token teraz — Odysseus pokaże go tylko raz:</div>
+            <div style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+              <code id="uf-wieik-token" style="flex:1;word-break:break-all;font-size:11px;"></code>
+              <button class="admin-btn-add" id="uf-wieik-copy" style="${btn}">Kopiuj</button>
+            </div>
+            <div style="opacity:0.7;margin-top:4px;">Wklej go w wieikschedule: Opcje → AI i integracje → Asystent AI → „Token dostępu Odysseusa (chat)”, a potem „Sprawdź połączenie”.</div>
+          </div>
+          <div class="settings-row" style="align-items:center;gap:6px;">
+            <span id="uf-wieik-token-msg" style="font-size:11px;flex:1;"></span>
+            <button class="admin-btn-add" id="uf-wieik-create" style="${btn}font-weight:600;">Utwórz token</button>
+          </div>
+
+          <div style="font-size:12px;font-weight:600;margin-top:12px;">2. Kalendarz „Plan zajęć”</div>
+          <div style="font-size:11px;opacity:0.7;">Twój plan z wieikschedule jako kalendarz w Odysseusie; zmiany terminu, sali i odwołania zapisują się w wieikschedule.</div>
+          ${status.linked ? `
+            <div style="font-size:11px;">${esc(status.label || '')} — ${esc(status.faculty || '')}${status.group_set_name ? `, ${esc(status.group_set_name)}` : ''} · ostatnia synchronizacja: ${esc(when(status.last_success_at))}</div>
+            ${status.last_error ? `<div style="font-size:11px;color:var(--red);">${esc(status.last_error)}</div>` : ''}
+            <div class="settings-row" style="align-items:center;gap:6px;">
+              <span id="uf-wieik-cal-msg" style="font-size:11px;flex:1;"></span>
+              <button class="admin-btn-add" id="uf-wieik-sync" style="${btn}">Odśwież</button>
+              <button class="admin-btn-add" id="uf-wieik-disconnect" style="${btn}">Rozłącz</button>
+            </div>` : `
+            <div class="settings-row"><label class="settings-label">Kod połączenia</label><input id="uf-wieik-code" class="settings-input" autocomplete="off" placeholder="XXXX-XXXX-XXXX" style="font-family:monospace"></div>
+            <div style="font-size:11px;opacity:0.7;">Kod wygenerujesz w wieikschedule: Opcje → AI i integracje → Kalendarz w Odysseusie. Jest ważny 10 minut.</div>
+            <div class="settings-row" style="align-items:center;gap:6px;">
+              <span id="uf-wieik-cal-msg" style="font-size:11px;flex:1;"></span>
+              <button class="admin-btn-add" id="uf-wieik-pair" style="${btn}font-weight:600;">Połącz</button>
+            </div>`}
+          <div class="settings-row" style="justify-content:flex-end;margin-top:10px;">
+            <button class="admin-btn-add" id="uf-wieik-close" style="${btn}">Zamknij</button>
+          </div>
+        </div>
+      </div>`;
+
+    const say = (id, text, ok) => { const m = el(id); if (m) { m.textContent = text; m.style.color = ok ? 'var(--green, #50fa7b)' : 'var(--red)'; } };
+    const reload = async () => { await renderList(); notifyIntegrationsChanged(); await showWieikForm(); };
+    const failure = async r => { const d = await r.json().catch(() => ({})); return new Error(d.detail || `HTTP ${r.status}`); };
+    el('uf-wieik-close').addEventListener('click', () => { formEl.style.display = 'none'; });
+
+    el('uf-wieik-create').addEventListener('click', async (e) => {
+      const button = e.currentTarget;
+      button.disabled = true;
+      try {
+        const names = new Set(own.map(t => t.name));
+        let name = 'wieikschedule', n = 2;
+        while (names.has(name)) name = `wieikschedule ${n++}`;
+        const fd = new FormData();
+        fd.append('name', name);
+        fd.append('scopes', 'chat');
+        const r = await fetch('/api/tokens', { method: 'POST', credentials: 'same-origin', body: fd });
+        if (r.status === 403) throw new Error('Tokeny może tworzyć tylko administrator Odysseusa.');
+        if (!r.ok) throw await failure(r);
+        const d = await r.json();
+        el('uf-wieik-token').textContent = d.token || '';
+        el('uf-wieik-reveal').style.display = '';
+        say('uf-wieik-token-msg', `Utworzono „${name}”.`, true);
+        await renderList();
+      } catch (err) {
+        say('uf-wieik-token-msg', err.message || 'Nie udało się utworzyć tokenu.', false);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    el('uf-wieik-copy').addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(el('uf-wieik-token').textContent); say('uf-wieik-token-msg', 'Skopiowano.', true); }
+      catch (_) { say('uf-wieik-token-msg', 'Nie udało się skopiować — zaznacz token ręcznie.', false); }
+    });
+    formEl.querySelectorAll('.uf-wieik-revoke').forEach(b => b.addEventListener('click', async () => {
+      if (!await window.styledConfirm('Unieważnić token? wieikschedule straci dostęp do rozmów z agentem planu.', { confirmText: 'Unieważnij', danger: true })) return;
+      b.disabled = true;
+      const r = await fetch(`/api/tokens/${b.dataset.tokenId}`, { method: 'DELETE', credentials: 'same-origin' });
+      if (!r.ok) { say('uf-wieik-token-msg', (await failure(r)).message, false); b.disabled = false; return; }
+      await reload();
+    }));
+
+    el('uf-wieik-pair')?.addEventListener('click', async (e) => {
+      const button = e.currentTarget;
+      button.disabled = true;
+      say('uf-wieik-cal-msg', 'Łączenie…', true);
+      try {
+        const r = await fetch('/api/calendar/wieik/pair', {
+          method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: el('uf-wieik-code').value.trim() }),
+        });
+        if (!r.ok) throw await failure(r);
+        await reload();
+      } catch (err) {
+        say('uf-wieik-cal-msg', err.message, false);
+        button.disabled = false;
+      }
+    });
+    el('uf-wieik-sync')?.addEventListener('click', async (e) => {
+      const button = e.currentTarget;
+      button.disabled = true;
+      say('uf-wieik-cal-msg', 'Synchronizacja…', true);
+      const r = await fetch('/api/calendar/wieik/sync', { method: 'POST', credentials: 'same-origin' });
+      if (!r.ok) { say('uf-wieik-cal-msg', (await failure(r)).message, false); button.disabled = false; return; }
+      await reload();
+    });
+    el('uf-wieik-disconnect')?.addEventListener('click', async () => {
+      if (!await window.styledConfirm('Usunąć kalendarz „Plan zajęć” z Odysseusa i odwołać połączenie?', { confirmText: 'Rozłącz', danger: true })) return;
+      const r = await fetch('/api/calendar/wieik', { method: 'DELETE', credentials: 'same-origin' });
+      if (!r.ok) { say('uf-wieik-cal-msg', (await failure(r)).message, false); return; }
+      const d = await r.json();
+      if (!d.revoked) say('uf-wieik-cal-msg', 'Kalendarz usunięty, ale nie udało się odwołać połączenia — odwołaj je w wieikschedule.', false);
+      await reload();
     });
   }
 
@@ -5520,6 +5670,7 @@ async function initUnifiedIntegrations() {
       ['contacts', 'Contacts Import'],
       ['email', 'Email (IMAP/SMTP)'],
       ['mcp', 'MCP Tool Server'],
+      ['wieik', 'Plan zajęć (wieikschedule)'],
     ];
     const _iconFor = (k) => (INTG_TYPES[k]?.icon || '').replace(/width="14"/, 'width="16"').replace(/height="14"/, 'height="16"');
     const _rowsHtml = _typeOptions.map(([k, label]) => `<button type="button" class="uf-type-option" data-value="${k}" style="display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;background:transparent;border:0;color:var(--fg);font:inherit;cursor:pointer;text-align:left;"><span style="display:inline-flex;color:var(--accent, var(--red));flex-shrink:0;">${_iconFor(k)}</span><span>${esc(label)}</span></button>`).join('');
