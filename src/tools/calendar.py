@@ -152,7 +152,7 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 return value
         return None
 
-    def _create_lendar_reminder(summary: str, location: str, dtstart: datetime,
+    def _create_calendar_reminder(summary: str, location: str, dtstart: datetime,
                                   all_day: bool, minutes_before: int,
                                   is_utc: bool = False) -> tuple[Optional[str], Optional[str]]:
         remind_at = dtstart - timedelta(minutes=minutes_before)
