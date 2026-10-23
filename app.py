@@ -131,28 +131,6 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# ========= CORS =========
-CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=CORS_ALLOW_METHODS,
-    allow_headers=[
-        "Accept",
-        "Authorization",
-        "Content-Type",
-        "X-API-Key",
-        "X-Auth-Token",
-        "X-Schedule-Context",
-        "X-Odysseus-Internal-Token",
-        "X-Odysseus-Owner",
-        "X-Requested-With",
-        "X-TZ-Offset",
-    ],
-)
-
 # ========= RESPONSE COMPRESSION (gzip) =========
 # The frontend's text assets (style.css, index.html, the JS bundles) shipped
 # uncompressed on every cold load. gzip cuts CSS/JS/HTML by ~75-85% on the wire
@@ -488,6 +466,31 @@ if AUTH_ENABLED:
     logger.info("Auth middleware enabled (AUTH_ENABLED=true)")
 else:
     logger.info("Auth middleware disabled (set AUTH_ENABLED=true to enable)")
+
+# ========= CORS =========
+# Registered last so it is the outermost middleware: auth errors (401) and other early responses
+# then carry CORS headers for allowed origins, and browser clients can show the real reason.
+CORS_ALLOW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=CORS_ALLOW_METHODS,
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-Auth-Token",
+        "X-Schedule-Context",
+        "X-Odysseus-Internal-Token",
+        "X-Odysseus-Owner",
+        "X-Requested-With",
+        "X-TZ-Offset",
+    ],
+)
+
 
 # ========= STATIC FILES =========
 os.makedirs(STATIC_DIR, exist_ok=True)

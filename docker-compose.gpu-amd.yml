@@ -67,6 +67,11 @@ services:
       - FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}
       - CLEANUP_INTERVAL_HOURS=${CLEANUP_INTERVAL_HOURS:-24}
       - ODYSSEUS_INPROCESS_POLLERS=${ODYSSEUS_INPROCESS_POLLERS:-1}
+      # wieikschedule backend for the "Plan zajęć" calendar mirror; empty disables the integration.
+      - SCHEDULE_GATEWAY_URL=${SCHEDULE_GATEWAY_URL:-}
+      # Model connections (IDs) the wieikschedule agent may use, and its default model; empty = none.
+      - SCHEDULE_MODEL_ENDPOINT_IDS=${SCHEDULE_MODEL_ENDPOINT_IDS:-}
+      - SCHEDULE_DEFAULT_MODEL=${SCHEDULE_DEFAULT_MODEL:-}
       - ODYSSEUS_INPROCESS_TASKS=${ODYSSEUS_INPROCESS_TASKS:-1}
       - ODYSSEUS_SCRIPT_HOST=${ODYSSEUS_SCRIPT_HOST:-localhost}
       - ODYSSEUS_CHAT_UPLOAD_MAX_BYTES=${ODYSSEUS_CHAT_UPLOAD_MAX_BYTES:-10485760}
