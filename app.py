@@ -1236,6 +1236,12 @@ async def _startup_event():
 
     _startup_tasks.append(asyncio.create_task(_null_owner_sweep_loop()))
 
+    # Refresh linked wieikschedule plan mirrors; the calendar UI also syncs on open.
+    from routes.email_pollers import _inprocess_pollers_enabled
+    if _inprocess_pollers_enabled():
+        from src.wieik_calendar_sync import sync_loop as _wieik_calendar_sync_loop
+        _startup_tasks.append(asyncio.create_task(_wieik_calendar_sync_loop()))
+
     # Nightly skill audit — at ~02:00 local, test + judge a batch of the
     # least-recently-checked skills, auto-fixing/escalating weak ones (never
     # deletes). Rotates through the library so each night covers different

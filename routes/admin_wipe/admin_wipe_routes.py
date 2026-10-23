@@ -30,6 +30,7 @@ from core.database import (
     GalleryAlbum,
     CalendarEvent,
     CalendarCal,
+    WieikCalendarLink,
 )
 from src.constants import DATA_DIR, SKILLS_DIR, SKILLS_FILE, GALLERY_DIR, GALLERY_UPLOADS_DIR
 
@@ -158,6 +159,7 @@ def setup_admin_wipe_routes(session_manager):
             if kind == "calendar":
                 # Events FK calendars — clear children first, then both.
                 db.query(CalendarEvent).delete()
+                db.query(WieikCalendarLink).delete()
                 count = db.query(CalendarCal).count()
                 db.query(CalendarCal).delete()
                 db.commit()

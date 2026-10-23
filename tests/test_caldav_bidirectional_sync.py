@@ -49,7 +49,7 @@ def test_http_calendar_writes_mark_pending_and_push_after_commit():
     assert 'await _push_caldav_event_after_commit(owner, base_uid, "update")' in source
     assert 'await _push_caldav_event_after_commit(owner, base_uid, "delete")' in source
     assert "_record_caldav_delete_tombstone(db, ev, owner)" in source
-    assert 'not result.get("ok")' in source
+    assert '"status": "pending"' in source
 
 
 def test_agent_calendar_writes_share_caldav_push_path():

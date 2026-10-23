@@ -866,26 +866,38 @@ async def action_tidy_calendar(owner: str, **kwargs) -> Tuple[str, bool]:
         from core.database import SessionLocal, CalendarEvent
         from sqlalchemy import func
 
+        from core.database import CalendarCal
+
         STATE_FILE = Path(TIDY_CALENDAR_STATE_FILE)
+        owner_key = owner or ""
+        saved = {}
         last_watermark = None
         try:
             if STATE_FILE.exists():
                 saved = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-                if saved.get("last_created_at"):
-                    last_watermark = datetime.fromisoformat(saved["last_created_at"])
+                # Watermarks are per owner; a legacy global one triggers one full rescan.
+                mark = (saved.get("owners") or {}).get(owner_key, {}).get("last_created_at")
+                if mark:
+                    last_watermark = datetime.fromisoformat(mark)
         except Exception:
-            last_watermark = None
+            saved, last_watermark = {}, None
 
         db = SessionLocal()
         try:
-            newest = db.query(func.max(CalendarEvent.created_at)).scalar()
-            db.query(CalendarEvent).count()
+            # Only the owner's own calendars; managed mirrors (plan from wieikschedule)
+            # are kept consistent by their sync and must never be pruned here.
+            def _scope(query):
+                query = query.join(CalendarCal, CalendarEvent.calendar_id == CalendarCal.id).filter(
+                    CalendarEvent.external_source.is_(None))
+                return query.filter(CalendarCal.owner == owner) if owner else query
+
+            newest = _scope(db.query(func.max(CalendarEvent.created_at))).scalar()
 
             # Short-circuit: nothing new since last run
             if last_watermark is not None and newest is not None and newest <= last_watermark:
                 raise TaskNoop(f"no new events since watermark {last_watermark.strftime('%Y-%m-%d %H:%M')}")
 
-            events = db.query(CalendarEvent).order_by(CalendarEvent.dtstart).all()
+            events = _scope(db.query(CalendarEvent)).order_by(CalendarEvent.dtstart).all()
             # Build full seen-set from events at or before the watermark (known-clean).
             # Events after the watermark are candidates for deletion.
             seen = {}
@@ -926,12 +938,14 @@ async def action_tidy_calendar(owner: str, **kwargs) -> Tuple[str, bool]:
             try:
                 STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
                 if newest is not None:
-                    STATE_FILE.write_text(json.dumps({
+                    owners_state = dict(saved.get("owners") or {})
+                    owners_state[owner_key] = {
                         "last_created_at": newest.isoformat(),
                         "last_run_at": datetime.utcnow().isoformat(),
                         "scanned": len(events),
                         "removed": len(removed),
-                    }, indent=2), encoding="utf-8")
+                    }
+                    STATE_FILE.write_text(json.dumps({"owners": owners_state}, indent=2), encoding="utf-8")
             except Exception as se:
                 logger.warning(f"tidy_calendar watermark save failed: {se}")
 
