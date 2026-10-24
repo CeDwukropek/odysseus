@@ -370,3 +370,54 @@ def test_missing_flags_force_a_full_pull_instead_of_304(store, monkeypatch):
     monkeypatch.setattr(sync, '_call', fake_call([(SimpleNamespace(headers={'etag': '"old"'}), feed(item('a')))], calls))
     asyncio.run(sync.sync_owner('alice'))
     assert calls[0][4] is None and mirror_rows(store)['a'].external_meta is not None
+
+
+def entry(entry_id, **extra):
+    return {'id': entry_id, 'scope': 'group', 'group': 'L1', 'kind': 'kolokwium', 'timing': 'class', 'date': '2026-10-21',
+            'start_time': '09:15:00', 'duration_min': 90, 'due_time': None, 'title': 'Kolokwium 1',
+            'subject': 'Modelowanie układów dynamicznych', 'details': 'Rozdziały 1–3', 'state': 'active', 'revision': 1,
+            'progress': 'todo', 'reminders': ['2026-10-20T16:00:00Z', '2026-10-21T06:15:00Z'], **extra}
+
+
+def reminder_notes(store):
+    with store() as db:
+        return {note.id: (note.title, note.due_date) for note in db.query(cdb.Note).filter(cdb.Note.source == sync.MANAGED_SOURCE)}
+
+
+def test_entries_are_mirrored_read_only_with_their_reminders_as_notes(store, monkeypatch):
+    monkeypatch.setattr(sync, 'datetime', type('Clock', (datetime,), {'utcnow': staticmethod(lambda: datetime(2026, 10, 20, 12, 0))}))
+    report = entry('r1', kind='sprawozdanie', timing='due', start_time=None, due_time=None, date='2026-10-28',
+                   title='Sprawozdanie 2', reminders=['2026-10-27T17:00:00Z'])
+    apply(store, {**feed(item('a')), 'entries': [entry('q1'), report]})
+    rows = mirror_rows(store)
+    quiz = rows['item:q1']
+    assert (quiz.summary, quiz.dtstart, quiz.dtend, quiz.all_day) == ('Kolokwium: Kolokwium 1', datetime(2026, 10, 21, 9, 15),
+                                                                     datetime(2026, 10, 21, 10, 45), False)
+    assert 'Zakres: Rozdziały 1–3' in quiz.description and 'Grupa L1' in quiz.description
+    assert rows['item:r1'].all_day is True and 'Termin oddania.' in rows['item:r1'].description
+    # Reminders after "now" become notes with UTC due dates; an earlier one is skipped.
+    notes = reminder_notes(store)
+    assert sorted(due for _, due in notes.values()) == ['2026-10-20T16:00:00Z', '2026-10-21T06:15:00Z', '2026-10-27T17:00:00Z']
+    assert ('Przypomnienie: Kolokwium: Kolokwium 1', '2026-10-21T06:15:00Z') in notes.values()
+    # The same feed again changes nothing; a finished entry loses its future reminders; a removed entry disappears.
+    assert apply(store, {**feed(item('a')), 'entries': [entry('q1'), report]})['unchanged'] == 3
+    apply(store, {**feed(item('a')), 'entries': [entry('q1', progress='done', reminders=[]), report]})
+    assert sorted(due for _, due in reminder_notes(store).values()) == ['2026-10-27T17:00:00Z']
+    apply(store, {**feed(item('a')), 'entries': [report]})
+    assert 'item:q1' not in mirror_rows(store)
+
+
+def test_entries_cannot_be_moved_removed_or_proposed_from_odysseus(store, monkeypatch):
+    apply(store, {**feed(item('a')), 'entries': [entry('q1')]})
+    uid = sync.mirror_uid('alice', 'item:q1')
+    async def fail_write(*args, **kwargs):
+        raise AssertionError('no write to wieikschedule')
+    monkeypatch.setattr(sync, '_write', fail_write)
+    for call in (sync.edit_from_ui('alice', uid, {'dtstart': datetime(2026, 10, 22, 9, 15), 'dtend': datetime(2026, 10, 22, 10, 45)}),
+                 sync.remove_from_ui('alice', uid), sync.restore_from_ui('alice', uid),
+                 sync.propose_from_agent('alice', uid, remove=True)):
+        with pytest.raises(sync.SyncError) as error:
+            asyncio.run(call)
+        assert error.value.code == 'ENTRY_READ_ONLY'
+    # Local fields still work.
+    assert asyncio.run(sync.edit_from_ui('alice', uid, {'color': '#00ff00'})) == {'ok': True, 'plan_changed': False}

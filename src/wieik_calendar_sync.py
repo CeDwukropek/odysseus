@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from core.database import SessionLocal, CalendarCal, CalendarEvent, WieikCalendarLink, utcnow_naive
+from core.database import SessionLocal, CalendarCal, CalendarEvent, Note, WieikCalendarLink, utcnow_naive
 from src.secret_storage import decrypt, encrypt
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,12 @@ _NAMESPACE = uuid.UUID("5f0d7a52-8d0c-4d1e-9a39-6c1b8a3e2f10")
 _KIND_LABELS = {"laboratory": "laboratorium", "lecture": "wykład", "exercise": "ćwiczenia",
                 "project": "projekt", "language": "lektorat"}
 _locks: dict[str, asyncio.Lock] = {}
+# Kolokwia, deadlines and other entries of the plan (E6.8): read-only rows next to the classes, and their
+# reminders as notes with a due date, which Odysseus already delivers (browser, e-mail, ntfy).
+ENTRY_PREFIX = "item:"
+ENTRY_MESSAGE = "Kolokwia i terminy zmieniasz w wieikschedule. Tutaj możesz zmienić tylko kolor, ważność i typ."
+_ENTRY_LABELS = {"kolokwium": "Kolokwium", "wejsciowka": "Wejściówka", "sprawozdanie": "Sprawozdanie",
+                 "egzamin": "Egzamin", "poprawa": "Poprawa", "projekt": "Projekt", "inne": "Termin"}
 
 
 class SyncError(Exception):
@@ -119,6 +125,68 @@ def _occurrence_fields(item):
     }
 
 
+def _entry_fields(entry):
+    day = datetime.strptime(entry["date"], "%Y-%m-%d")
+    hour = (entry.get("due_time") if entry["timing"] == "due" else entry.get("start_time")) or ""
+    if not hour:
+        start, end, all_day = day, day + timedelta(days=1), True
+    else:
+        h, m, *_ = (int(part) for part in hour.split(":"))
+        start, all_day = day.replace(hour=h, minute=m), False
+        # A deadline is an instant; a short block keeps it visible in day views.
+        end = start + timedelta(minutes=30 if entry["timing"] == "due" else int(entry.get("duration_min") or 90))
+    label = _ENTRY_LABELS.get(entry.get("kind"), "Termin")
+    audience = ("Tylko dla Ciebie" if entry.get("scope") == "personal"
+                else f"Grupa {entry['group']}" if entry.get("group") else "Wszystkie grupy")
+    lines = [line for line in (
+        entry.get("subject") or "",
+        audience,
+        "Termin oddania." if entry["timing"] == "due" else "",
+        f"Zakres: {entry['details']}" if entry.get("details") else "",
+        "Do sprawdzenia: zajęcia zmieniły się, potwierdź termin u prowadzącego." if entry.get("state") == "review" else "",
+        "Zrobione." if entry.get("progress") == "done" else "",
+        "Wpis z wieikschedule — zmiany wprowadzaj w wieikschedule.",
+    ) if line]
+    return {
+        "summary": f"{label}: {entry['title']}", "description": "\n".join(lines), "location": "",
+        "dtstart": start, "dtend": end, "all_day": all_day, "is_utc": False, "rrule": "", "status": "confirmed",
+    }
+
+
+def reminder_note_id(owner, entry_id, at) -> str:
+    return str(uuid.uuid5(_NAMESPACE, f"{owner}:{ENTRY_PREFIX}{entry_id}:{at}"))
+
+
+def _sync_reminders(db, owner, entries, now=None):
+    """Future reminders of the feed's entries as notes; ones no longer wanted are removed, past ones are left."""
+    now = now or datetime.utcnow()
+    wanted = {}
+    for entry in entries:
+        label = _ENTRY_LABELS.get(entry.get("kind"), "Termin")
+        when = entry["date"] + (" " + (entry.get("start_time") or entry.get("due_time") or "")[:5]).rstrip()
+        for at in entry.get("reminders") or []:
+            moment = datetime.fromisoformat(at.replace("Z", "+00:00")).replace(tzinfo=None)
+            if moment <= now:
+                continue
+            wanted[reminder_note_id(owner, entry["id"], at)] = {
+                "title": f"Przypomnienie: {label}: {entry['title']}",
+                "items": json.dumps([{"text": f"{entry.get('subject') or label} — {when}", "done": False, "checked": False}],
+                                    ensure_ascii=False),
+                "due_date": moment.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    notes = {note.id: note for note in db.query(Note).filter(Note.owner == owner, Note.source == MANAGED_SOURCE)}
+    for note_id, values in wanted.items():
+        note = notes.get(note_id)
+        if note is None:
+            db.add(Note(id=note_id, owner=owner, note_type="todo", label="wieikschedule", source=MANAGED_SOURCE, **values))
+        else:
+            for key, value in values.items():
+                setattr(note, key, value)
+    for note_id, note in notes.items():
+        due = (note.due_date or "").rstrip("Z")
+        if note_id not in wanted and due and datetime.fromisoformat(due) > now:
+            db.delete(note)
+
+
 def apply_feed(db, cal, owner, payload) -> dict:
     """Bring mirror rows in line with one feed window. Commits are left to the caller."""
     counts = {"created": 0, "updated": 0, "deleted": 0, "unchanged": 0}
@@ -146,6 +214,28 @@ def apply_feed(db, cal, owner, payload) -> dict:
             setattr(row, key, value)
         row.external_version = item["version"]
         row.external_meta = json.dumps({"added": bool(item.get("added")), "modified": bool(item.get("modified"))})
+    entries = payload.get("entries") or []
+    for entry in entries:
+        key = ENTRY_PREFIX + str(entry["id"])
+        seen.add(key)
+        version = json.dumps([entry.get("revision"), entry.get("progress"), entry.get("state"), entry.get("reminders")])
+        row = existing.get(key)
+        if row is not None and row.external_version == version:
+            counts["unchanged"] += 1
+            continue
+        if row is None:
+            row = CalendarEvent(uid=mirror_uid(owner, key), calendar_id=cal.id, origin=MANAGED_SOURCE,
+                                external_source=MANAGED_SOURCE, external_id=key)
+            db.add(row)
+            counts["created"] += 1
+        else:
+            counts["updated"] += 1
+        for name, value in _entry_fields(entry).items():
+            setattr(row, name, value)
+        row.external_version = version
+        row.external_meta = json.dumps({"entry": True, "kind": entry.get("kind")})
+    if "entries" in payload:
+        _sync_reminders(db, owner, entries)
     # Only prune inside the window the feed covered; older history stays.
     window_start = datetime.strptime(payload["date_from"], "%Y-%m-%d")
     window_end = datetime.strptime(payload["date_to"], "%Y-%m-%d") + timedelta(days=1)
@@ -390,10 +480,17 @@ def _save_local(owner, uid, local):
             db.commit()
 
 
+def _refuse_entry(row):
+    if str(row["external_id"] or "").startswith(ENTRY_PREFIX):
+        raise SyncError(422, "ENTRY_READ_ONLY", ENTRY_MESSAGE)
+
+
 async def edit_from_ui(owner, uid, changes) -> dict:
     """A user's own edit in the calendar: plan fields go to wieikschedule at once, local ones stay here."""
     row = _mirror_row(owner, uid)
     values, local = plan_edit(row, changes)
+    if values:
+        _refuse_entry(row)
     if values:
         await _write(owner, row, "modify", values)
     _save_local(owner, uid, local)
@@ -402,6 +499,7 @@ async def edit_from_ui(owner, uid, changes) -> dict:
 
 async def remove_from_ui(owner, uid) -> dict:
     row = _mirror_row(owner, uid)
+    _refuse_entry(row)
     if row["all_day"]:
         raise SyncError(422, "DAY_OFF", "Dni wolnych nie można usuwać.")
     data = await _write(owner, row, "remove")
@@ -410,6 +508,7 @@ async def remove_from_ui(owner, uid) -> dict:
 
 async def restore_from_ui(owner, uid) -> dict:
     row = _mirror_row(owner, uid)
+    _refuse_entry(row)
     await _write(owner, row, "restore")
     return {"ok": True}
 
@@ -452,10 +551,13 @@ async def propose_from_agent(owner, uid, changes=None, remove=False) -> dict:
     """
     row = _mirror_row(owner, uid)
     if remove:
+        _refuse_entry(row)
         data = await _write(owner, row, "remove", mode="propose")
         local = {}
     else:
         values, local = plan_edit(row, changes or {})
+        if values:
+            _refuse_entry(row)
         data = await _write(owner, row, "modify", values, mode="propose") if values else None
     _save_local(owner, uid, local)
     proposal = (data or {}).get("proposal")
