@@ -395,3 +395,24 @@ def test_route_restores_verified_filters_and_returns_plan_ui_without_storing_too
 ])
 def test_unambiguous_plan_filters(message, expected):
     assert requested_plan_filters(message) == expected
+
+
+def test_entries_mode_returns_the_backend_preview_without_a_separate_read():
+    turns = iter([[{"name": "plan_items_prepare_entries", "arguments":
+        '{"kind":"kolokwium","subject":"Analiza obwodów","terms":[{"date":"2026-11-05"},{"date":"2026-11-12"}]}'}], []])
+    async def completion(endpoint, messages, tools, sid):
+        assert [tool["function"]["name"] for tool in tools] == ["plan_items_prepare_entries"]
+        assert "wks1" not in json.dumps(messages)
+        return {"content": "Przygotowałem podgląd dwóch kolokwiów.", "calls": next(turns)}
+    preview = {"type": "plan_items", "id": "p1", "items": [{"index": 0}, {"index": 1}], "signature": "s"}
+    async def request(body):
+        assert body["tool"] == "plan_items.prepare_entries"
+        return {"status": "prepared", "message": "Nic nie zostało zapisane.", "proposal": preview}
+    body = SimpleNamespace(faculty="EiAs3", groups={"L": "L4"}, intent="entries",
+                           message="Kolokwia z analizy obwodów będą na labach 5.11 i 12.11, plan zajęć bez zmian")
+    identity = {"selection": {"faculty": "EiAs3", "groups": {"L": "L4"}},
+                "tools": [{"name": "plan_items.prepare_entries", "description": "entries preview", "inputSchema": {}}]}
+    result = run(run_schedule_agent(body, identity, SimpleNamespace(request=request), {}, [], "entries", completion=completion))
+    # The preview reaches the app as it came from the backend; the words "plan" and "zajęć" do not force a schedule read.
+    assert result["proposals"] == [preview]
+    assert result["output"] == "Przygotowałem podgląd dwóch kolokwiów."
