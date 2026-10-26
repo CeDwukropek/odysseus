@@ -30,6 +30,7 @@ import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
 import { UI_VIS_DEFAULT_OFF, resolveVisibility } from './js/ui_visibility.js';
 import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
+import busesModule from './js/buses.js';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js?v=20260716openrouter3';
@@ -173,6 +174,7 @@ function initRailHoverLabels() {
     'rail-delete-session': 'Delete',
     'rail-chats': 'Chat',
     'rail-documents': 'Docs',
+    'rail-buses': 'Buses',
     'rail-calendar': 'Calendar',
     'rail-compare': 'Compare',
     'rail-cookbook': 'Cookbook',
@@ -1074,6 +1076,17 @@ function initializeEventListeners() {
     });
   }
 
+  // Buses tool button
+  const toolBusesBtn = el('tool-buses-btn');
+  if (toolBusesBtn) {
+    toolBusesBtn.addEventListener('click', async () => {
+      const Modals = await import('./js/modalManager.js');
+      if (!Modals.toggle('buses-modal')) {
+        busesModule.isBusesOpen() ? busesModule.closeBuses() : busesModule.openBuses();
+      }
+    });
+  }
+
   // Calendar tool button
   const toolCalendarBtn = el('tool-calendar-btn');
   if (toolCalendarBtn) {
@@ -1226,6 +1239,7 @@ function initializeEventListeners() {
     '/memory':   () => document.getElementById('tool-memory-btn')?.click(),
     '/gallery':  () => document.getElementById('tool-gallery-btn')?.click(),
     '/tasks':    () => document.getElementById('tool-tasks-btn')?.click(),
+    '/buses':    () => document.getElementById('tool-buses-btn')?.click(),
     '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
   };
   const _opener = _routeOpen[urlPath];
@@ -3747,6 +3761,7 @@ function startOdysseusApp() {
     'rail-archive':   'tool-library-btn',
     'rail-gallery':   'tool-gallery-btn',
     'rail-tasks':     'tool-tasks-btn',
+    'rail-buses':     'tool-buses-btn',
     'rail-calendar':  'tool-calendar-btn',
     'rail-notes':     'tool-notes-btn',
     'rail-memory':    'tool-memory-btn',

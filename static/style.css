@@ -5621,6 +5621,7 @@ body.bg-pattern-sparkles {
       #calendar-modal,
       #gallery-modal,
       #tasks-modal,
+      #buses-modal,
       #memory-modal,
       #doclib-modal,
       #compare-model-overlay,
@@ -7366,6 +7367,7 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
          library) to the same top edge. */
       #cookbook-modal .modal-content,
       #tasks-modal .modal-content,
+      #buses-modal .modal-content,
       #calendar-modal .modal-content,
       #memory-modal .memory-modal-content,
       #settings-modal .settings-modal-content,
@@ -7420,7 +7422,8 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       #email-lib-modal .modal-content,
       #doclib-modal .modal-content,
       #gallery-modal .modal-content,
-      #tasks-modal .modal-content {
+      #tasks-modal .modal-content,
+      #buses-modal .modal-content {
         /* vh-first as fallback for very old browsers, then dvh wins so
            the modal shrinks/grows with the mobile URL bar. Wrong order
            previously made the expanded chat preview extend below the
@@ -7437,7 +7440,8 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       #email-lib-modal,
       #doclib-modal,
       #gallery-modal,
-      #tasks-modal {
+      #tasks-modal,
+      #buses-modal {
         padding-top: 0 !important;
         align-items: stretch !important;
       }
@@ -7448,11 +7452,13 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       /* The inner body must flex to fill the new full height, and the
          tasks list inside it must scroll independently — otherwise the
          list crops at whatever pre-mobile height the desktop layout had. */
-      #tasks-modal .modal-content {
+      #tasks-modal .modal-content,
+      #buses-modal .modal-content {
         display: flex !important;
         flex-direction: column !important;
       }
-      #tasks-modal .modal-body {
+      #tasks-modal .modal-body,
+      #buses-modal .modal-body {
         flex: 1 1 auto !important;
         min-height: 0 !important;
       }
@@ -41551,4 +41557,188 @@ body.settings-sidebar-resize-active {
   .settings-sidebar-toggle {
     display: none;
   }
+}
+
+/* ── Buses (Rabka ↔ Kraków departures board) ── */
+.buses-modal-content {
+  max-width: 640px;
+  width: min(640px, 92vw);
+  background: var(--bg);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+}
+.buses-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0 4px;
+}
+.buses-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.buses-seg-btn {
+  background: none;
+  border: none;
+  color: var(--fg);
+  font: inherit;
+  padding: 5px 10px;
+  cursor: pointer;
+  opacity: 0.65;
+}
+.buses-seg-btn + .buses-seg-btn { border-left: 1px solid var(--border); }
+.buses-seg-btn.active {
+  opacity: 1;
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+.buses-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.85;
+}
+.buses-field select,
+.buses-field input {
+  background: var(--select-bg, var(--bg));
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  padding: 4px 6px;
+}
+.buses-field input { width: 3.5em; }
+.buses-icon-btn,
+.buses-link-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.buses-link-btn {
+  border: none;
+  color: var(--red);
+  text-decoration: underline;
+  padding: 4px 2px;
+}
+.buses-icon-btn:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.buses-location {
+  font-size: 12px;
+  opacity: 0.75;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.buses-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: 8px;
+}
+.buses-empty {
+  text-align: center;
+  padding: 28px 12px;
+  opacity: 0.8;
+  line-height: 1.6;
+}
+.buses-error { color: var(--red); opacity: 1; }
+.buses-muted { opacity: 0.6; }
+.buses-cards,
+.buses-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.buses-card,
+.buses-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.buses-card-main,
+.buses-row-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  line-height: 1.4;
+  background: none;
+  border: none;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.buses-card-time {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 3.2em;
+}
+.buses-card:first-child .buses-card-time { color: var(--red); }
+.buses-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.buses-card-sub { opacity: 0.7; font-size: 12px; }
+.buses-chevron { opacity: 0.5; transition: transform 0.15s; }
+.open > button > .buses-chevron { transform: rotate(180deg); }
+.buses-row-time {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 3em;
+}
+.buses-row-route { flex: 1; min-width: 0; }
+.buses-row-carrier { opacity: 0.7; white-space: nowrap; }
+.buses-row.departed { opacity: 0.45; }
+.buses-stops {
+  list-style: none;
+  margin: 0;
+  padding: 4px 10px 10px 12px;
+  border-top: 1px dashed var(--border);
+}
+.buses-stops li {
+  display: flex;
+  gap: 10px;
+  padding: 2px 0;
+}
+.buses-stop-time {
+  font-variant-numeric: tabular-nums;
+  min-width: 6.5em;
+  opacity: 0.75;
+}
+.buses-stops li.buses-stop-here {
+  color: var(--red);
+  font-weight: 600;
+}
+.buses-daynav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.buses-daylabel { flex: 1; text-align: center; }
+.buses-footer {
+  font-size: 11px;
+  opacity: 0.55;
+  padding: 10px 2px 4px;
+}
+@media (max-width: 768px) {
+  .buses-modal-content { width: 100vw; max-width: 100vw; }
+  /* Room for the overlay scrollbar so it doesn't sit on the row borders. */
+  .buses-body { padding-right: 6px; }
+  .buses-row-main { flex-wrap: wrap; gap: 4px 10px; }
+  .buses-row-route { order: 3; flex-basis: 100%; }
 }

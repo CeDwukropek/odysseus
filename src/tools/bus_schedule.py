@@ -20,6 +20,10 @@ SEARCH_PATH = "/public/searchingResults.do?method=task"
 DEFAULT_DEBUG_PATH = Path("/app/data/mcp_tools/debug_search_result.html")
 REQUEST_TIMEOUT = 35
 MAX_RESULT_EXTENSIONS = 24
+ALL_CARRIER_TYPES = ("1", "2", "3", "4", "5")
+# e-podroznik's "bus" carrier type: the only one Maxbus, Majerbus and Szwagropol
+# are listed under. Searching it alone avoids paging through trains and RAB BUS.
+BUS_CARRIER_TYPES = ("1",)
 LOCAL_TIMEZONE = ZoneInfo("Europe/Warsaw")
 
 _CITY_TYPES = {"CITY", "BIG_CITY", "VERY_BIG_CITY"}
@@ -134,8 +138,14 @@ def search_connections(
     from_city: str,
     to_city: str,
     debug_path: Path | None = DEFAULT_DEBUG_PATH,
+    carrier_types: tuple[str, ...] = ALL_CARRIER_TYPES,
+    start_time: str | None = None,
 ) -> str:
-    """Submit a one-way search using the initialized session and tabToken."""
+    """Submit a one-way search using the initialized session and tabToken.
+
+    Without start_time e-podroznik starts today's results at the current time;
+    pass "00:00" to get the whole day.
+    """
     try:
         parsed_date = date_type.fromisoformat(travel_date)
     except (TypeError, ValueError) as exc:
@@ -152,11 +162,12 @@ def search_connections(
         (f"{prefix}toText", to_city),
         (f"{prefix}dateV", parsed_date.strftime("%d.%m.%Y")),
         (f"{prefix}arrivalV", "DEPARTURE"),
-        (f"{prefix}timeV", ""),
-        (f"{prefix}ommitTime", "on"),
-        ("minimalTimeForChangeV", ""),
+        (f"{prefix}timeV", start_time or ""),
     ]
-    data.extend((f"{prefix}carrierTypes", value) for value in ("1", "2", "3", "4", "5"))
+    if start_time is None:
+        data.append((f"{prefix}ommitTime", "on"))
+    data.append(("minimalTimeForChangeV", ""))
+    data.extend((f"{prefix}carrierTypes", value) for value in carrier_types)
 
     response = session.post(
         f"{BASE_URL}{SEARCH_PATH}",
@@ -251,6 +262,76 @@ def _text(node: Any) -> str:
     return node.get_text(" ", strip=True) if node else ""
 
 
+def _row_carrier(row: Any) -> str | None:
+    """Return the single supported carrier of a direct connection row."""
+    # A row with several legs is a transfer (e.g. FlixBus to Nowy Targ, then
+    # Maxbus); its carrier nodes may list only the supported leg.
+    if str(row.get("data-connectionscount") or "1") != "1":
+        return None
+
+    raw_names: list[str] = []
+    for carrier_node in row.select("[data-carrier-name], .carrier-name"):
+        raw_name = (carrier_node.get("data-carrier-name") or _text(carrier_node)).strip()
+        raw_name = re.sub(r"\s*\(przedsiębiorca\)\s*$", "", raw_name, flags=re.I)
+        if raw_name and raw_name not in raw_names:
+            raw_names.append(raw_name)
+
+    normalized = {normalize_carrier(raw_name) for raw_name in raw_names}
+    normalized.discard(None)
+    unknown = any(normalize_carrier(raw_name) is None for raw_name in raw_names)
+    if unknown or len(normalized) != 1:
+        return None
+    return normalized.pop()
+
+
+def parse_connection_rows(html: str, travel_date: str) -> list[dict[str, Any]]:
+    """Extract every direct target-carrier connection departing on travel_date.
+
+    Unlike parse_connections this keeps departed connections and the
+    session-bound details path, which the departures board needs.
+    """
+    try:
+        target_date = date_type.fromisoformat(travel_date)
+    except (TypeError, ValueError) as exc:
+        raise BusScheduleError("Data musi mieć format YYYY-MM-DD.") from exc
+
+    soup = BeautifulSoup(html, "html.parser")
+    connections: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for row in soup.select("div.searching-result"):
+        departure_datetime = _row_departure_datetime(row, target_date)
+        if departure_datetime is None or departure_datetime.date() != target_date:
+            continue
+
+        departure = _text(row.select_one(".edge-date-time .departure .time"))
+        arrival = _text(row.select_one(".edge-date-time .arrival .time"))
+        if not re.fullmatch(r"\d{2}:\d{2}", departure) or not re.fullmatch(r"\d{2}:\d{2}", arrival):
+            continue
+
+        carrier = _row_carrier(row)
+        if carrier is None:
+            continue
+
+        key = (departure, arrival, carrier)
+        if key in seen:
+            continue
+        seen.add(key)
+        connections.append(
+            {
+                "departure": departure,
+                "arrival": arrival,
+                "carrier": carrier,
+                "from_stop": _text(row.select_one(".edge-stops-names .departure")),
+                "to_stop": _text(row.select_one(".edge-stops-names .arrival")),
+                "departure_at": departure_datetime,
+                "details_path": str(row.get("data-detailspath") or ""),
+            }
+        )
+
+    return sorted(connections, key=lambda item: item["departure_at"])
+
+
 def parse_connections(
     html: str,
     travel_date: str | None = None,
@@ -287,25 +368,54 @@ def parse_connections(
         if not re.fullmatch(r"\d{2}:\d{2}", departure) or not re.fullmatch(r"\d{2}:\d{2}", arrival):
             continue
 
-        raw_names: list[str] = []
-        for carrier_node in row.select("[data-carrier-name], .carrier-name"):
-            raw_name = (carrier_node.get("data-carrier-name") or _text(carrier_node)).strip()
-            raw_name = re.sub(r"\s*\(przedsiębiorca\)\s*$", "", raw_name, flags=re.I)
-            if raw_name and raw_name not in raw_names:
-                raw_names.append(raw_name)
-
-        normalized = {normalize_carrier(raw_name) for raw_name in raw_names}
-        normalized.discard(None)
-        unknown = any(normalize_carrier(raw_name) is None for raw_name in raw_names)
-        if unknown or len(normalized) != 1:
+        carrier = _row_carrier(row)
+        if carrier is None:
             continue
 
-        carrier = normalized.pop()
         connection = {"departure": departure, "arrival": arrival, "carrier": carrier}
+        # Boarding and alighting stops, e.g. "Kraków, MDA, ul. Bosacka".
+        from_stop = _text(row.select_one(".edge-stops-names .departure"))
+        to_stop = _text(row.select_one(".edge-stops-names .arrival"))
+        if from_stop:
+            connection["from_stop"] = from_stop
+        if to_stop:
+            connection["to_stop"] = to_stop
         if connection not in connections:
             connections.append(connection)
 
     return sorted(connections, key=lambda item: item["departure"])
+
+
+def _stop_time(value: str) -> str:
+    match = re.search(r"\d{2}:\d{2}", value or "")
+    return match.group(0) if match else ""
+
+
+def parse_route_details(html: str) -> list[dict[str, str]]:
+    """Extract the ordered stops from a connection's "Szczegóły trasy" page."""
+    soup = BeautifulSoup(html, "html.parser")
+    stops: list[dict[str, str]] = []
+    for details in soup.select(".route-details"):
+        name = _text(details.select_one(".stop-name"))
+        if not name:
+            continue
+        arrival = _stop_time(_text(details.select_one(".arrival")))
+        departure = _stop_time(_text(details.select_one(".departure")))
+        container = details.find_parent(class_=["stop-item", "route-details-container"])
+        day = container.select_one(".route-day[data-associatedday]") if container else None
+        raw_day = str(day.get("data-associatedday", "")) if day else ""
+        stop_date = ""
+        if re.fullmatch(r"\d{8}", raw_day):
+            stop_date = f"{raw_day[4:]}-{raw_day[2:4]}-{raw_day[:2]}"
+        stops.append(
+            {
+                "name": name,
+                "arrival": arrival or departure,
+                "departure": departure or arrival,
+                "date": stop_date,
+            }
+        )
+    return stops
 
 
 def get_bus_schedule(from_city: str, to_city: str, travel_date: str) -> dict[str, Any]:

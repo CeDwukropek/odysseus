@@ -8,7 +8,9 @@ from src.tools.bus_schedule import (
     BusScheduleError,
     extend_search_results,
     normalize_carrier,
+    parse_connection_rows,
     parse_connections,
+    parse_route_details,
     resolve_place,
     search_connections,
 )
@@ -46,9 +48,20 @@ class FakePagingSession:
         return self.responses.pop(0)
 
 
-def result_row(timestamp_ms, departure, arrival, carrier="Majer Bus"):
+FIXTURES = Path(__file__).parent / "fixtures" / "bus_schedule"
+
+
+def result_row(timestamp_ms, departure, arrival, carrier="Majer Bus", *, legs=1, stops=None):
+    names = ""
+    if stops:
+        names = (
+            f'<span class="edge-stops-names"><span class="departure">{stops[0]}</span>'
+            f'<span class="arrival">{stops[1]}</span></span>'
+        )
     return f"""
-    <div class="searching-result" data-departure-timestamp="{timestamp_ms}">
+    <div class="searching-result" data-departure-timestamp="{timestamp_ms}"
+         data-connectionscount="{legs}" data-detailspath="/public/searchingResultExtended.do?resultId={departure}">
+      {names}
       <span class="edge-date-time"><span class="departure"><span class="time">{departure}</span></span>
       <span class="arrival"><span class="time">{arrival}</span></span></span>
       <span class="carrier-name">{carrier}</span>
@@ -110,6 +123,8 @@ def test_search_connections_builds_expected_payload_and_debug_file(tmp_path: Pat
     assert sent["fromV"] == "c|7201"
     assert sent["toV"] == "c|55156"
     assert sent["formCompositeSearchingResults.formCompositeSearcherFinalH.dateV"] == "05.10.2026"
+    assert sent["formCompositeSearchingResults.formCompositeSearcherFinalH.timeV"] == ""
+    assert sent["formCompositeSearchingResults.formCompositeSearcherFinalH.ommitTime"] == "on"
 
 
 def test_search_connections_rejects_invalid_date_before_network_call():
@@ -209,4 +224,99 @@ def test_parse_keeps_all_connections_for_a_future_date():
     ) == [
         {"departure": "05:23", "arrival": "06:40", "carrier": "Maxbus"},
         {"departure": "21:00", "arrival": "22:10", "carrier": "Szwagropol"},
+    ]
+
+
+def test_search_connections_can_limit_carrier_types():
+    session = FakeSession(FakeResponse(text="<html>result</html>"))
+
+    search_connections(
+        session,
+        "c|7201",
+        "c|55156",
+        "2026-10-05",
+        tab_token="a" * 32,
+        from_city="Rabka-Zdrój",
+        to_city="Kraków",
+        debug_path=None,
+        carrier_types=("1",),
+    )
+
+    sent = [value for key, value in session.calls[0][1]["data"] if key.endswith("carrierTypes")]
+    assert sent == ["1"]
+
+
+def test_parse_reports_boarding_stops_and_drops_transfers():
+    warsaw = ZoneInfo("Europe/Warsaw")
+    direct = result_row(
+        timestamp_ms(datetime(2026, 10, 7, 6, 10, tzinfo=warsaw)), "06:10", "07:21", "Szwagropol",
+        stops=("KRAKÓW MDA", "Rabka-Zdrój, RABKA - ZABORNIA"),
+    )
+    # FlixBus to Nowy Targ + Maxbus: only the Maxbus leg is a carrier node.
+    transfer = result_row(
+        timestamp_ms(datetime(2026, 10, 7, 4, 10, tzinfo=warsaw)), "04:10", "06:23", "Max Bus", legs=2,
+        stops=("Kraków MDA, ul. Bosacka 18", "Rabka Zdrój, Zabornia"),
+    )
+
+    assert parse_connections(
+        transfer + direct, "2026-10-07", now=datetime(2026, 10, 6, 10, 0, tzinfo=warsaw)
+    ) == [
+        {
+            "departure": "06:10",
+            "arrival": "07:21",
+            "carrier": "Szwagropol",
+            "from_stop": "KRAKÓW MDA",
+            "to_stop": "Rabka-Zdrój, RABKA - ZABORNIA",
+        }
+    ]
+
+
+def test_parse_connection_rows_keeps_departed_connections_with_details_path():
+    warsaw = ZoneInfo("Europe/Warsaw")
+    morning = result_row(
+        timestamp_ms(datetime(2026, 10, 6, 5, 23, tzinfo=warsaw)), "05:23", "06:40",
+        stops=("Rabka Zdrój, Zabornia", "Kraków, MDA, ul. Bosacka"),
+    )
+    next_day = result_row(timestamp_ms(datetime(2026, 10, 7, 5, 23, tzinfo=warsaw)), "05:23", "06:40")
+
+    rows = parse_connection_rows(morning + next_day, "2026-10-06")
+
+    assert len(rows) == 1
+    assert rows[0]["carrier"] == "Majerbus"
+    assert rows[0]["from_stop"] == "Rabka Zdrój, Zabornia"
+    assert rows[0]["details_path"] == "/public/searchingResultExtended.do?resultId=05:23"
+    assert rows[0]["departure_at"] == datetime(2026, 10, 6, 5, 23, tzinfo=warsaw)
+
+
+def test_parse_route_details_lists_every_stop_in_order():
+    html = (FIXTURES / "route_details_krakow_rabka.html").read_text(encoding="utf-8")
+
+    stops = parse_route_details(html)
+
+    assert [stop["name"] for stop in stops] == [
+        "KRAKÓW MDA",
+        "Kraków AGH/UR",
+        "KRAKÓW, Jubilat",
+        "Kraków Rondo Matecznego",
+        "Kraków Borek Fałęcki",
+        "Myślenice Estakada",
+        'Skomielna Biała "skrzyżowanie"',
+        "Rabka-Zdrój, RABKA - ZABORNIA",
+    ]
+    assert stops[0] == {"name": "KRAKÓW MDA", "arrival": "06:10", "departure": "06:10", "date": "2026-10-27"}
+    assert stops[1]["departure"] == "06:15"
+    assert stops[-1]["arrival"] == "07:21"
+
+
+def test_parse_route_details_fills_missing_departure_at_terminus():
+    html = """
+    <div class="route-details-container lastStop">
+      <span class="route-day" data-associatedday="28102026"></span><span class="route-time">00:20</span>
+      <span class="route-details"><span class="stop-name">Kraków, MDA, ul. Bosacka</span>
+      <span class="arrival">Przyjazd: 00:20</span></span>
+    </div>
+    """
+
+    assert parse_route_details(html) == [
+        {"name": "Kraków, MDA, ul. Bosacka", "arrival": "00:20", "departure": "00:20", "date": "2026-10-28"}
     ]

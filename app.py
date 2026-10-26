@@ -828,6 +828,10 @@ app.include_router(setup_compare_routes(session_manager))
 from routes.prefs_routes import setup_prefs_routes
 app.include_router(setup_prefs_routes())
 
+# Rabka ↔ Kraków bus departures board
+from routes.bus_routes import setup_bus_routes
+app.include_router(setup_bus_routes())
+
 # Backup (export/import user data)
 from routes.backup_routes import setup_backup_routes
 app.include_router(setup_backup_routes(memory_manager, preset_manager, skills_manager))
@@ -944,6 +948,10 @@ async def serve_tasks(request: Request):
 
 @app.get("/library")
 async def serve_library(request: Request):
+    return await serve_index(request)
+
+@app.get("/buses")
+async def serve_buses(request: Request):
     return await serve_index(request)
 
 @app.get("/backgrounds")
