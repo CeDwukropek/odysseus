@@ -74,6 +74,38 @@ export function arrivalAtEnd(connection, fallbackDay) {
 }
 
 /**
+ * Arrival at `destId` after boarding at `boardId`, or null when the bus does
+ * not reach it after that stop. `destId` 'end' (or empty) means the terminus.
+ */
+export function arrivalAt(connection, destId, boardId, fallbackDay) {
+  const stops = connection.stops || [];
+  if (!destId || destId === 'end' || !stops.length) {
+    return { stop: stops[stops.length - 1] || null, at: arrivalAtEnd(connection, fallbackDay) };
+  }
+  const from = boardId ? stops.findIndex((stop) => stop.stop_id === boardId) : 0;
+  const index = stops.findIndex((stop, i) => i > from && stop.stop_id === destId);
+  if (index === -1) return null;
+  const stop = stops[index];
+  return { stop, at: localDate(stop.date || fallbackDay, stop.arrival) };
+}
+
+// A saved place counts as "here" within this radius (plus GPS accuracy,
+// capped so a coarse fix can't match a place across town).
+export const PLACE_RADIUS_METERS = 250;
+
+/** The saved place the user is at, if any — nearest first. */
+export function matchPlace(places, position) {
+  if (!position) return null;
+  const slack = PLACE_RADIUS_METERS + Math.min(Number(position.accuracy) || 0, 150);
+  let best = null;
+  for (const place of places || []) {
+    const meters = distanceMeters(position, place);
+    if (meters <= slack && (!best || meters < best.meters)) best = { place, meters };
+  }
+  return best;
+}
+
+/**
  * Connections the user can still catch at `stopId`: boarding time must be at
  * least walk + buffer minutes from now. `leaveBy` is the latest moment to set
  * off that still keeps the buffer.

@@ -10,7 +10,14 @@ from fastapi.testclient import TestClient
 
 from routes.bus_routes import setup_bus_routes
 from src import bus_departures
-from src.bus_departures import DepartureBoard, fetch_day, match_stop, stop_label, validate_request
+from src.bus_departures import (
+    DepartureBoard,
+    LeaveAlerts,
+    fetch_day,
+    match_stop,
+    stop_label,
+    validate_request,
+)
 from src.tools.bus_schedule import BusScheduleError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "bus_schedule"
@@ -217,11 +224,20 @@ def test_fetch_day_attaches_stops_and_labels():
     ]
 
 
+def _client(tmp_path, board, *, push_ready=True):
+    alerts = LeaveAlerts(
+        tmp_path / "alerts.json",
+        sender=lambda title, body: (True, ""),
+        clock=lambda: datetime(2026, 10, 27, 7, 0, tzinfo=WARSAW),
+    )
+    app = FastAPI()
+    app.include_router(setup_bus_routes(board, alerts, notifier_ready=lambda: push_ready))
+    return TestClient(app), alerts
+
+
 def test_schedule_route_validates_and_delegates(tmp_path):
     board = DepartureBoard(tmp_path, fetcher=lambda d, t: schedule(t), clock=Clock())
-    app = FastAPI()
-    app.include_router(setup_bus_routes(board))
-    client = TestClient(app)
+    client, _ = _client(tmp_path, board)
 
     assert client.get("/api/buses/schedule", params={"direction": "north"}).status_code == 400
     client.get("/api/buses/schedule", params={"direction": "to_krakow", "date": "2026-10-27"})
@@ -232,3 +248,124 @@ def test_schedule_route_validates_and_delegates(tmp_path):
     assert response.json()["status"] == "ready"
     assert stops[0]["id"] == "zabornia"
     assert "match" not in stops[0]
+
+
+def test_board_warm_queues_today_and_tomorrow_both_ways_one_fetch_at_a_time(tmp_path):
+    calls = []
+    running = []
+
+    def fetcher(direction, travel_date):
+        running.append(1)
+        assert len(running) == 1, "e-podroznik must be scraped one day at a time"
+        calls.append((direction, travel_date))
+        running.pop()
+        return schedule(travel_date)
+
+    board = DepartureBoard(tmp_path, fetcher=fetcher, clock=Clock())
+    board.warm(today=date(2026, 10, 27))
+    board.wait()
+    board.warm(today=date(2026, 10, 27))  # fresh now: nothing to refetch
+    board.wait()
+
+    assert sorted(calls) == [
+        ("to_krakow", "2026-10-27"), ("to_krakow", "2026-10-28"),
+        ("to_rabka", "2026-10-27"), ("to_rabka", "2026-10-28"),
+    ]
+
+
+def test_board_get_ready_waits_for_the_background_fetch(tmp_path):
+    board = DepartureBoard(tmp_path, fetcher=lambda d, t: schedule(t), clock=Clock())
+
+    result = board.get_ready("to_krakow", "2026-10-27", timeout=5, poll=0.01)
+
+    assert result["status"] == "ready"
+
+
+def test_leave_alerts_fire_once_when_due(tmp_path):
+    now = [datetime(2026, 10, 27, 7, 0, tzinfo=WARSAW)]
+    sent = []
+    alerts = LeaveAlerts(tmp_path / "alerts.json", sender=lambda t, b: (sent.append((t, b)), (True, ""))[1], clock=lambda: now[0])
+    record = alerts.add("emil", {
+        "date": "2026-10-27", "connection_id": "07:38-Majerbus", "stop_id": "zabornia",
+        "leave_at": "2026-10-27T07:20:00+01:00", "title": "Wyjdź na busa 07:38", "body": "Majerbus z Zabornii",
+    })
+
+    assert alerts.dispatch_due() == []
+    now[0] = datetime(2026, 10, 27, 7, 20, 30, tzinfo=WARSAW)
+    assert [a["id"] for a in alerts.dispatch_due()] == [record["id"]]
+    assert alerts.dispatch_due() == []
+    assert sent == [("Wyjdź na busa 07:38", "Majerbus z Zabornii")]
+    assert alerts.for_owner("emil") == []
+
+
+def test_leave_alerts_skip_long_overdue_and_reject_past(tmp_path):
+    now = [datetime(2026, 10, 27, 7, 0, tzinfo=WARSAW)]
+    sent = []
+    alerts = LeaveAlerts(tmp_path / "alerts.json", sender=lambda t, b: (sent.append(t), (True, ""))[1], clock=lambda: now[0])
+    alerts.add("emil", {"date": "2026-10-27", "connection_id": "a", "stop_id": "agh", "leave_at": "2026-10-27T07:10:00+01:00"})
+    with pytest.raises(BusScheduleError):
+        alerts.add("emil", {"date": "2026-10-27", "connection_id": "b", "stop_id": "agh", "leave_at": "2026-10-27T06:59:00+01:00"})
+
+    now[0] = datetime(2026, 10, 27, 7, 30, tzinfo=WARSAW)  # server was down past the grace window
+    assert len(alerts.dispatch_due()) == 1
+    assert sent == []
+
+
+def test_leave_alerts_are_per_owner(tmp_path):
+    alerts = LeaveAlerts(tmp_path / "alerts.json", sender=lambda t, b: (True, ""),
+                         clock=lambda: datetime(2026, 10, 27, 7, 0, tzinfo=WARSAW))
+    record = alerts.add("emil", {"date": "2026-10-27", "connection_id": "a", "stop_id": "agh", "leave_at": "2026-10-27T07:10:00+01:00"})
+
+    assert alerts.for_owner("other") == []
+    assert alerts.remove("other", record["id"]) is False
+    assert alerts.remove("emil", record["id"]) is True
+
+
+def test_alert_routes_round_trip(tmp_path):
+    board = DepartureBoard(tmp_path, fetcher=lambda d, t: schedule(t), clock=Clock())
+    client, _ = _client(tmp_path, board, push_ready=False)
+    payload = {"date": "2026-10-27", "connection_id": "07:38-Majerbus", "stop_id": "zabornia",
+               "leave_at": "2026-10-27T06:20:00.000Z", "title": "Wyjdź", "body": "teraz"}
+
+    created = client.post("/api/buses/alerts", json=payload).json()
+    listed = client.get("/api/buses/alerts").json()
+    past = client.post("/api/buses/alerts", json={**payload, "leave_at": "2026-10-27T05:00:00Z"})
+    deleted = client.delete(f'/api/buses/alerts/{created["alert"]["id"]}')
+    missing = client.delete(f'/api/buses/alerts/{created["alert"]["id"]}')
+
+    assert created["push_ready"] is False
+    assert created["alert"]["leave_at"].startswith("2026-10-27T06:20:00")
+    assert [a["id"] for a in listed["alerts"]] == [created["alert"]["id"]]
+    assert past.status_code == 400
+    assert deleted.status_code == 200
+    assert missing.status_code == 404
+
+
+def test_push_ntfy_uses_integration_topic_and_utf8_title(monkeypatch):
+    from src import ntfy_push
+
+    calls = []
+
+    class Response:
+        ok = True
+        status_code = 200
+
+    monkeypatch.setattr("src.integrations.load_integrations",
+                        lambda: [{"preset": "ntfy", "enabled": True, "base_url": "https://ntfy.example/"}])
+    monkeypatch.setattr("src.settings.load_settings", lambda: {"reminder_ntfy_topic": "busy"})
+    monkeypatch.setattr("src.url_safety.check_outbound_url", lambda url, block_private: (True, ""))
+    monkeypatch.setattr(ntfy_push.requests, "post", lambda url, **kw: (calls.append((url, kw)), Response())[1])
+
+    assert ntfy_push.push_ntfy("Wyjdź na busa 07:38", "Majerbus z Zabornii") == (True, "")
+    url, kwargs = calls[0]
+    assert url == "https://ntfy.example/busy"
+    assert kwargs["params"]["title"] == "Wyjdź na busa 07:38"
+    assert kwargs["data"] == "Majerbus z Zabornii".encode("utf-8")
+
+
+def test_push_ntfy_reports_missing_integration(monkeypatch):
+    from src import ntfy_push
+
+    monkeypatch.setattr("src.integrations.load_integrations", lambda: [])
+    assert ntfy_push.push_ntfy("t", "b") == (False, "No enabled ntfy integration")
+    assert ntfy_push.ntfy_configured() is False

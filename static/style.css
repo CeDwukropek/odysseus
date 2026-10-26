@@ -41735,6 +41735,68 @@ body.settings-sidebar-resize-active {
   opacity: 0.55;
   padding: 10px 2px 4px;
 }
+.buses-icon-btn.active {
+  color: var(--red);
+  border-color: var(--red);
+}
+.buses-card-head {
+  display: flex;
+  align-items: stretch;
+}
+.buses-card-head .buses-card-main { flex: 1; min-width: 0; }
+.buses-bell {
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  color: var(--fg);
+  opacity: 0.5;
+  padding: 0 14px;
+  cursor: pointer;
+}
+.buses-bell:hover { opacity: 0.9; }
+.buses-bell.active {
+  opacity: 1;
+  color: var(--red);
+}
+.buses-bell.active svg { fill: currentColor; }
+.buses-places {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.buses-place-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.buses-place-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.buses-place-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.buses-place-form input[type="text"],
+.buses-place-form select {
+  background: var(--select-bg, var(--bg));
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  padding: 4px 6px;
+}
+.buses-place-form input[type="text"] { flex: 1 1 8em; min-width: 0; }
 @media (max-width: 768px) {
   .buses-modal-content { width: 100vw; max-width: 100vw; }
   /* Room for the overlay scrollbar so it doesn't sit on the row borders. */

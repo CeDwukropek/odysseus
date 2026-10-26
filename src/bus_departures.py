@@ -71,6 +71,9 @@ CACHE_TTL_SECONDS = 6 * 3600
 ERROR_RETRY_SECONDS = 60
 DETAILS_PAUSE_SECONDS = 0.15
 MAX_DAYS_AHEAD = 60
+WARM_DAYS = 2                      # today and tomorrow, both directions
+WARM_INTERVAL_SECONDS = 30 * 60    # well inside CACHE_TTL_SECONDS
+ALERT_GRACE_MINUTES = 3
 
 
 def match_stop(name: str) -> str | None:
@@ -211,8 +214,11 @@ class DepartureBoard:
         self.ttl = ttl
         self.clock = clock
         self._lock = threading.Lock()
+        # One e-podroznik scrape at a time: parallel paging got connections reset.
+        self._fetch_lock = threading.Lock()
         self._jobs: dict[tuple[str, str], threading.Thread] = {}
         self._errors: dict[tuple[str, str], tuple[float, str]] = {}
+        self._warmer: threading.Thread | None = None
 
     def _path(self, key: tuple[str, str]) -> Path:
         return self.cache_dir / f"{key[0]}_{key[1]}.json"
@@ -241,7 +247,8 @@ class DepartureBoard:
 
     def _run(self, key: tuple[str, str]) -> None:
         try:
-            schedule = self.fetcher(*key)
+            with self._fetch_lock:
+                schedule = self.fetcher(*key)
             self._write(key, schedule)
             with self._lock:
                 self._errors.pop(key, None)
@@ -285,3 +292,132 @@ class DepartureBoard:
             jobs = list(self._jobs.values())
         for job in jobs:
             job.join(timeout)
+
+    def get_ready(self, direction: str, travel_date: str, *, timeout: float = 60.0, poll: float = 1.0) -> dict[str, Any]:
+        """Block until the day is cached (or failed / timed out) — for callers without a UI to poll."""
+        deadline = time.monotonic() + timeout
+        result = self.get(direction, travel_date)
+        while result["status"] == "loading" and time.monotonic() < deadline:
+            time.sleep(poll)
+            result = self.get(direction, travel_date)
+        return result
+
+    def warm(self, *, days: int = WARM_DAYS, today: date_type | None = None) -> None:
+        """Queue refreshes of stale days so opening the board never waits."""
+        current = today or datetime.now(LOCAL_TIMEZONE).date()
+        for offset in range(days):
+            travel_date = (current + timedelta(days=offset)).isoformat()
+            for direction in DIRECTIONS:
+                self.get(direction, travel_date)
+
+    def start_warmer(self, *, interval: float = WARM_INTERVAL_SECONDS, initial_delay: float = 60.0) -> None:
+        if self._warmer is not None:
+            return
+
+        def loop() -> None:
+            time.sleep(initial_delay)
+            while True:
+                try:
+                    self.warm()
+                except Exception:
+                    logger.exception("bus schedule warm-up failed")
+                time.sleep(interval)
+
+        self._warmer = threading.Thread(target=loop, name="bus-warmer", daemon=True)
+        self._warmer.start()
+
+
+class LeaveAlerts:
+    """"Time to leave" pushes for chosen buses, persisted so restarts keep them."""
+
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        sender: Callable[[str, str], tuple[bool, str]],
+        clock: Callable[[], datetime] = lambda: datetime.now(LOCAL_TIMEZONE),
+    ):
+        self.path = Path(path)
+        self.sender = sender
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._loop: threading.Thread | None = None
+
+    def _load(self) -> list[dict[str, Any]]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _save(self, alerts: list[dict[str, Any]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(alerts, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def add(self, owner: str, alert: dict[str, Any]) -> dict[str, Any]:
+        leave_at = datetime.fromisoformat(alert["leave_at"])
+        if leave_at.tzinfo is None:
+            leave_at = leave_at.replace(tzinfo=LOCAL_TIMEZONE)
+        if leave_at <= self.clock():
+            raise BusScheduleError("Na ten kurs trzeba wyjść już teraz.")
+        record = {
+            "id": f'{alert["date"]}-{alert["connection_id"]}-{alert["stop_id"]}',
+            "owner": owner,
+            "date": alert["date"],
+            "connection_id": alert["connection_id"],
+            "stop_id": alert["stop_id"],
+            "leave_at": leave_at.isoformat(),
+            "title": str(alert.get("title") or "Czas wyjść na busa")[:200],
+            "body": str(alert.get("body") or "")[:500],
+        }
+        with self._lock:
+            alerts = [a for a in self._load() if a["id"] != record["id"] or a["owner"] != owner]
+            alerts.append(record)
+            self._save(alerts)
+        return record
+
+    def for_owner(self, owner: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [a for a in self._load() if a["owner"] == owner]
+
+    def remove(self, owner: str, alert_id: str) -> bool:
+        with self._lock:
+            alerts = self._load()
+            kept = [a for a in alerts if not (a["owner"] == owner and a["id"] == alert_id)]
+            self._save(kept)
+            return len(kept) != len(alerts)
+
+    def dispatch_due(self) -> list[dict[str, Any]]:
+        """Send and drop every alert whose leave time has come; returns the sent ones."""
+        now = self.clock()
+        with self._lock:
+            alerts = self._load()
+            due = [a for a in alerts if datetime.fromisoformat(a["leave_at"]) <= now]
+            if not due:
+                return []
+            self._save([a for a in alerts if a not in due])
+        for alert in due:
+            # Long overdue (server was down): a late "leave now" would mislead.
+            if now - datetime.fromisoformat(alert["leave_at"]) > timedelta(minutes=ALERT_GRACE_MINUTES):
+                continue
+            sent, error = self.sender(alert["title"], alert["body"])
+            if not sent:
+                logger.warning("bus leave alert %s not delivered: %s", alert["id"], error)
+        return due
+
+    def start(self, *, interval: float = 15.0) -> None:
+        if self._loop is not None:
+            return
+
+        def loop() -> None:
+            while True:
+                try:
+                    self.dispatch_due()
+                except Exception:
+                    logger.exception("bus leave alerts loop failed")
+                time.sleep(interval)
+
+        self._loop = threading.Thread(target=loop, name="bus-leave-alerts", daemon=True)
+        self._loop.start()

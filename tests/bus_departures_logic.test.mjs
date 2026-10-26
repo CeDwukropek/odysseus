@@ -78,3 +78,22 @@ test('day helpers', () => {
   assert.equal(logic.formatMinutes(80), '1 h 20 min');
   assert.equal(logic.formatMinutes(120), '2 h');
 });
+
+test('arrival at a destination stop after boarding', () => {
+  const bus = connection('a', [['mda', '06:10'], ['agh', '06:15'], ['jubilat', '06:17'], ['zabornia', '07:21']]);
+  assert.equal(logic.formatTime(logic.arrivalAt(bus, 'jubilat', 'agh', '2026-10-27').at), '06:17');
+  assert.equal(logic.formatTime(logic.arrivalAt(bus, 'end', 'agh', '2026-10-27').at), '07:21');
+  // Already passed MDA when boarding at AGH.
+  assert.equal(logic.arrivalAt(bus, 'mda', 'agh', '2026-10-27'), null);
+});
+
+test('saved places match within radius plus capped accuracy', () => {
+  const places = [
+    {id: 'home', lat: 49.6070, lon: 19.9500},
+    {id: 'faculty', lat: 50.0660, lon: 19.9190},
+  ];
+  assert.equal(logic.matchPlace(places, {lat: 49.6072, lon: 19.9503, accuracy: 20}).place.id, 'home');
+  // ~600 m away: no match even with a coarse fix (accuracy capped at 150 m).
+  assert.equal(logic.matchPlace(places, {lat: 49.6124, lon: 19.9500, accuracy: 2000}), null);
+  assert.equal(logic.matchPlace(places, null), null);
+});
