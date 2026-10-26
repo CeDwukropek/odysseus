@@ -176,3 +176,72 @@ async def test_connect_all_enabled_timeout_does_not_block_other_servers(monkeypa
 
     assert set(completed) == {1, 3}
     assert elapsed < 1
+
+def _slow_then_fast(manager, calls, hangs=1):
+    async def fake_connect_server(server_id, **kwargs):
+        calls.append(server_id)
+        if len(calls) <= hangs:
+            await asyncio.sleep(30)
+        manager._connections[server_id] = {"status": "connected", "name": kwargs["name"]}
+        return True
+    return fake_connect_server
+
+
+def _short_timeouts(monkeypatch, mcp_manager):
+    real_wait_for = asyncio.wait_for
+
+    async def short_wait_for(awaitable, timeout):
+        return await real_wait_for(awaitable, timeout=0.2)
+
+    monkeypatch.setattr(mcp_manager.asyncio, "wait_for", short_wait_for)
+
+
+_SLOW = SimpleNamespace(id="slow", name="slow", transport="stdio", command="cmd",
+                        args=json.dumps([]), env=json.dumps({}), url=None)
+
+
+@pytest.mark.asyncio
+async def test_timed_out_server_is_retried_in_the_background(monkeypatch):
+    import src.mcp_manager as mcp_manager
+    from src.mcp_manager import McpManager
+
+    manager = McpManager()
+    manager.RETRY_DELAYS = (0, 0, 0)
+    monkeypatch.setattr(mcp_manager, "SessionLocal", lambda: FakeDB([_SLOW]))
+    _short_timeouts(monkeypatch, mcp_manager)
+    calls = []
+    monkeypatch.setattr(manager, "connect_server", _slow_then_fast(manager, calls, hangs=2))
+
+    start = time.perf_counter()
+    await manager.connect_all_enabled()
+    # Startup does not wait for the retries.
+    assert time.perf_counter() - start < 1
+    assert manager._connections["slow"]["status"] == "timeout"
+
+    await manager._retry_tasks["slow"]
+    # One startup attempt, one retry that timed out again, one that connected; no further tries.
+    assert calls == ["slow", "slow", "slow"]
+    assert manager._connections["slow"]["status"] == "connected"
+    assert "slow" not in manager._retry_tasks
+
+
+@pytest.mark.asyncio
+async def test_retry_stops_when_the_server_is_disconnected(monkeypatch):
+    import src.mcp_manager as mcp_manager
+    from src.mcp_manager import McpManager
+
+    manager = McpManager()
+    manager.RETRY_DELAYS = (5,)
+    monkeypatch.setattr(mcp_manager, "SessionLocal", lambda: FakeDB([_SLOW]))
+    _short_timeouts(monkeypatch, mcp_manager)
+    calls = []
+    monkeypatch.setattr(manager, "connect_server", _slow_then_fast(manager, calls))
+
+    await manager.connect_all_enabled()
+    retry = manager._retry_tasks["slow"]
+    await manager.disconnect_server("slow")
+    await asyncio.sleep(0)
+
+    assert retry.cancelled()
+    assert calls == ["slow"]
+    assert "slow" not in manager._connections

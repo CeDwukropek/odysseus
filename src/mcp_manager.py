@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import asyncio 
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 from src.database import McpServer, SessionLocal
 
@@ -146,6 +147,8 @@ class McpManager:
         self._stacks: Dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
         self._connect_tasks: Dict[str, Any] = {}
+        # server_id -> background retry after a startup timeout
+        self._retry_tasks: Dict[str, Any] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -398,6 +401,9 @@ class McpManager:
         task = self._connect_tasks.pop(server_id, None)
         if task is not None and not task.done():
             task.cancel()
+        retry = self._retry_tasks.pop(server_id, None)
+        if retry is not None and retry is not asyncio.current_task() and not retry.done():
+            retry.cancel()
         try:
             from src.mcp_oauth import clear_auth_url
             clear_auth_url(server_id)
@@ -439,7 +445,12 @@ class McpManager:
             db.close()
 
 
-    async def _connect_with_timeout(self, srv):
+    # A server that times out at startup (often a busy host right after boot)
+    # is retried in the background, so its tools come back without a manual
+    # reconnect. Retries stop once anything else changes the server's status.
+    RETRY_DELAYS = (30, 60, 120)
+
+    async def _connect_with_timeout(self, srv, retry: bool = True):
         args = json.loads(srv.args) if srv.args else []
         env = json.loads(srv.env) if srv.env else {}
 
@@ -463,6 +474,25 @@ class McpManager:
                 "error": f"Timed out after 20 seconds",
                 "name": srv.name,
             }
+            if retry and srv.id not in self._retry_tasks:
+                self._retry_tasks[srv.id] = asyncio.create_task(self._retry_after_timeout(srv))
+
+    async def _retry_after_timeout(self, srv):
+        # The ORM row may be detached by now; keep only the plain fields.
+        srv = SimpleNamespace(id=srv.id, name=srv.name, transport=srv.transport, command=srv.command,
+                              args=srv.args, env=srv.env, url=srv.url)
+        try:
+            for delay in self.RETRY_DELAYS:
+                await asyncio.sleep(delay)
+                if self._connections.get(srv.id, {}).get("status") != "timeout":
+                    return
+                logger.info("Retrying MCP server %s after a timeout", srv.name)
+                await self._connect_with_timeout(srv, retry=False)
+                if self._connections.get(srv.id, {}).get("status") != "timeout":
+                    return
+        finally:
+            if self._retry_tasks.get(srv.id) is asyncio.current_task():
+                self._retry_tasks.pop(srv.id, None)
 
     async def call_tool(self, qualified_name: str, arguments: Dict) -> Dict:
         """Call an MCP tool by its qualified name (mcp__{server_id}__{tool_name}).
