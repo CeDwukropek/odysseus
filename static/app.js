@@ -33,7 +33,11 @@ import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js?v=20260716openrouter3';
-import settingsModule from './js/settings.js?v=20260815approvalsave1';
+// Plain specifier, like every other importer of settings.js (admin.js,
+// chatRenderer.js, ...). A ?v= query here loaded a second copy of the module
+// with its own `initialized` flag, so Settings was wired twice and e.g. the
+// Reminders "Test" button sent every test reminder twice.
+import settingsModule from './js/settings.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
