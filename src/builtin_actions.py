@@ -2233,7 +2233,17 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                         title=title, note_body=body, note_id=n.id,
                         owner=n.owner or owner or "",
                     )
-                    cache[n.id] = now.isoformat()
+                    # Keep the {"at", "channel"} entry dispatch_reminder just
+                    # wrote to STATE. Overwriting it with a bare timestamp made
+                    # dispatch_reminder treat it as browser-only, so an open
+                    # tab's frontend poller re-sent the same email/ntfy
+                    # reminder a minute later.
+                    try:
+                        fresh = _json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
+                    except Exception:
+                        fresh = {}
+                    entry = fresh.get(n.id)
+                    cache[n.id] = entry if isinstance(entry, dict) and entry.get("channel") else now.isoformat()
                     sent.append(title)
                 except Exception as e:
                     logger.warning(f"ping_notes: dispatch failed for {n.id}: {e}")
