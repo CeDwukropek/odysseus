@@ -97,3 +97,20 @@ test('saved places match within radius plus capped accuracy', () => {
   assert.equal(logic.matchPlace(places, {lat: 49.6124, lon: 19.9500, accuracy: 2000}), null);
   assert.equal(logic.matchPlace(places, null), null);
 });
+
+test('includeTight keeps buses that still run but no longer fit walk + buffer', () => {
+  const connections = [
+    connection('gone', [['mda', '06:30'], ['agh', '06:35'], ['zabornia', '07:40']]),
+    connection('late', [['mda', '06:38'], ['agh', '06:44'], ['zabornia', '07:50']]),
+    connection('rush', [['mda', '06:45'], ['agh', '06:52'], ['zabornia', '08:00']]),
+    connection('fine', [['mda', '06:55'], ['agh', '07:01'], ['zabornia', '08:10']]),
+  ];
+  const now = new Date(2026, 9, 27, 6, 40);
+  const options = {stopId: 'agh', now, walk: 7, buffer: 10, day: '2026-10-27'};
+
+  assert.deepEqual(logic.catchable(connections, options).map((i) => i.connection.id), ['fine']);
+  assert.deepEqual(
+    logic.catchable(connections, {...options, includeTight: true}).map((i) => [i.connection.id, i.fit, i.minutesLeft]),
+    [['late', 'too-late', 4], ['rush', 'no-buffer', 12], ['fine', 'ok', 21]],
+  );
+});

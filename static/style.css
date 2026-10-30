@@ -41684,7 +41684,17 @@ body.settings-sidebar-resize-active {
   font-variant-numeric: tabular-nums;
   min-width: 3.2em;
 }
-.buses-card:first-child .buses-card-time { color: var(--red); }
+.buses-card-next .buses-card-time { color: var(--red); }
+/* Still running, but walk + buffer no longer fits: orange until it leaves. */
+.buses-card-tight {
+  border-color: var(--warn, #f0ad4e);
+  background: color-mix(in srgb, var(--warn, #f0ad4e) 10%, var(--panel));
+}
+.buses-card-tight .buses-card-time,
+.buses-card-tight .buses-card-sub {
+  color: var(--warn, #f0ad4e);
+  opacity: 1;
+}
 .buses-card-info {
   display: flex;
   flex-direction: column;

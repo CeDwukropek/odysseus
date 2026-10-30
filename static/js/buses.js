@@ -385,6 +385,13 @@ function _destLabel(arrival, connection) {
   return connection.to_label;
 }
 
+function _cardSub({ fit, minutesLeft, walk, leaveAt }) {
+  const left = minutesLeft < 1 ? 'odjeżdża teraz' : `za ${formatMinutes(minutesLeft)}`;
+  if (fit === 'no-buffer') return `${left} · wyjdź teraz, bez zapasu`;
+  if (fit === 'too-late') return `${left} · dojście ${walk} min, nie zdążysz spacerem`;
+  return `${left} · wyjdź najpóźniej ${formatTime(leaveAt)}`;
+}
+
 function _renderCatch(body) {
   const direction = _direction();
   const today = isoDay(new Date());
@@ -400,8 +407,9 @@ function _renderCatch(body) {
   const buffer = Number(_prefs.buffer) || 0;
   const walk = _walk();
   const destId = _destId();
+  // Buses that no longer fit walk + buffer stay visible in orange until they leave.
   const list = catchable(result.schedule.connections, {
-    stopId: boarding.stop.id, now: new Date(), walk, buffer, day: today,
+    stopId: boarding.stop.id, now: new Date(), walk, buffer, day: today, includeTight: true,
   })
     .map((item) => ({ ...item, arrival: arrivalAt(item.connection, destId, boarding.stop.id, today) }))
     .filter((item) => item.arrival);
@@ -414,8 +422,11 @@ function _renderCatch(body) {
     return;
   }
 
-  const cards = list.map(({ connection, boarding: board, leaveBy, minutesLeft, arrival }) => {
+  const nextId = (list.find((item) => item.fit === 'ok') || {}).connection?.id;
+  const cards = list.map(({ connection, boarding: board, leaveBy, minutesLeft, arrival, fit }) => {
     const open = _expanded.has(connection.id);
+    const tight = fit !== 'ok';
+    const state = tight ? ' buses-card-tight' : connection.id === nextId ? ' buses-card-next' : '';
     const destLabel = _destLabel(arrival, connection);
     const alertId = _alertId(today, connection.id, boarding.stop.id);
     const alertOn = _alerts.has(alertId);
@@ -423,7 +434,7 @@ function _renderCatch(body) {
     const alertTitle = `Wyjdź na busa ${formatTime(board.at)}`;
     const alertBody = `${connection.carrier} z ${boarding.stop.label} o ${formatTime(board.at)} → ${destLabel} ${formatTime(arrival.at)}. Dojście ${walk} min + zapas ${buffer} min.`;
     return `
-      <div class="buses-card${open ? ' open' : ''}" data-id="${esc(connection.id)}"
+      <div class="buses-card${open ? ' open' : ''}${state}" data-id="${esc(connection.id)}"
            data-alert-id="${esc(alertId)}" data-connection-id="${esc(connection.id)}" data-stop-id="${esc(boarding.stop.id)}"
            data-leave-at="${esc(leaveBy.toISOString())}" data-title="${esc(alertTitle)}" data-body="${esc(alertBody)}">
         <div class="buses-card-head">
@@ -431,13 +442,13 @@ function _renderCatch(body) {
             <span class="buses-card-time">${formatTime(board.at)}</span>
             <span class="buses-card-info">
               <span class="buses-card-line"><b>${esc(connection.carrier)}</b> · ${esc(destLabel)} ${formatTime(arrival.at)}</span>
-              <span class="buses-card-sub">za ${formatMinutes(minutesLeft)} · wyjdź najpóźniej ${formatTime(leaveAt)}</span>
+              <span class="buses-card-sub">${_cardSub({ fit, minutesLeft, walk, leaveAt })}</span>
             </span>
             <span class="buses-chevron">▾</span>
           </button>
-          <button type="button" class="buses-bell${alertOn ? ' active' : ''}" aria-pressed="${alertOn}"
+          ${tight && !alertOn ? '' : `<button type="button" class="buses-bell${alertOn ? ' active' : ''}" aria-pressed="${alertOn}"
                   title="${alertOn ? 'Usuń przypomnienie' : `Przypomnij o ${formatTime(leaveAt)}`}"
-                  aria-label="${alertOn ? 'Usuń przypomnienie' : `Przypomnij o ${formatTime(leaveAt)}`}">${BELL_ICON}</button>
+                  aria-label="${alertOn ? 'Usuń przypomnienie' : `Przypomnij o ${formatTime(leaveAt)}`}">${BELL_ICON}</button>`}
         </div>
         ${open ? _stopsHtml(connection, [boarding.stop.id, arrival.stop && arrival.stop.stop_id].filter(Boolean)) : ''}
       </div>`;

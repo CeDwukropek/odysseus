@@ -109,19 +109,30 @@ export function matchPlace(places, position) {
  * Connections the user can still catch at `stopId`: boarding time must be at
  * least walk + buffer minutes from now. `leaveBy` is the latest moment to set
  * off that still keeps the buffer.
+ *
+ * With `includeTight`, buses that have not left yet but no longer fit are
+ * kept too, tagged by `fit`: 'ok' (walk + buffer fits), 'no-buffer' (only the
+ * walk fits — leave now) or 'too-late' (not even the walk fits).
  */
-export function catchable(connections, { stopId, now, walk = 0, buffer = 0, day }) {
+export function catchable(connections, { stopId, now, walk = 0, buffer = 0, day, includeTight = false }) {
+  const walkMs = walk * 60000;
   const marginMs = (walk + buffer) * 60000;
   const out = [];
   for (const connection of connections || []) {
     const boarding = boardingAt(connection, stopId, day);
     if (!boarding) continue;
-    if (boarding.at.getTime() - now.getTime() < marginMs) continue;
+    const untilMs = boarding.at.getTime() - now.getTime();
+    let fit = 'ok';
+    if (untilMs < marginMs) {
+      if (!includeTight || untilMs < 0) continue;
+      fit = untilMs >= walkMs ? 'no-buffer' : 'too-late';
+    }
     out.push({
       connection,
       boarding,
+      fit,
       leaveBy: new Date(boarding.at.getTime() - marginMs),
-      minutesLeft: Math.round((boarding.at.getTime() - now.getTime()) / 60000),
+      minutesLeft: Math.round(untilMs / 60000),
     });
   }
   return out.sort((a, b) => a.boarding.at - b.boarding.at);
